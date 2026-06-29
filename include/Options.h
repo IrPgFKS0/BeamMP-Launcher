@@ -19,6 +19,7 @@ struct Options {
     bool no_download = false;
     bool no_update = false;
     bool no_launch = false;
+    bool full_mod_hash = false; // force full SHA256 re-validation of cached+mounted mods each connect (default off = fast name+size validate)
     const char* user_path = nullptr;
     const char **game_arguments = nullptr;
     int game_arguments_length = 0;

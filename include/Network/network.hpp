@@ -6,6 +6,7 @@
 
 
 #pragma once
+#include <atomic>
 #include <filesystem>
 #include <string>
 
@@ -26,13 +27,13 @@ extern int ProxyPort;
 extern int ClientID;
 extern int LastPort;
 extern bool ModLoaded;
-extern bool Terminate;
+extern std::atomic<bool> Terminate; // accessed from multiple threads (Core/TCP/UDP/Resources)
 extern uint64_t UDPSock;
 extern uint64_t TCPSock;
 extern std::string Branch;
 extern std::filesystem::path CachingDirectory;
 extern bool deleteDuplicateMods;
-extern bool TCPTerminate;
+extern std::atomic<bool> TCPTerminate; // accessed from multiple threads
 extern std::string LastIP;
 extern std::string MStatus;
 extern std::string UlStatus;
@@ -47,6 +48,7 @@ void GameSend(std::string_view Data);
 void SendLarge(std::string Data);
 std::string TCPRcv(uint64_t Sock);
 void SyncResources(uint64_t TCPSock);
+void ProcessPendingModRemovals();
 std::string GetAddr(const std::string& IP);
 void ServerParser(std::string_view Data);
 std::string Login(const std::string& fields);

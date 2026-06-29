@@ -38,8 +38,8 @@
 
 extern int TraceBack;
 std::set<std::string>* ConfList = nullptr;
-bool TCPTerminate = false;
-bool Terminate = false;
+std::atomic<bool> TCPTerminate { false };
+std::atomic<bool> Terminate { false };
 bool LoginAuth = false;
 std::string Username = "";
 std::string UserRole = "";
@@ -49,7 +49,7 @@ std::string MStatus;
 bool ModLoaded;
 int ping = -1;
 SOCKET CoreSocket = -1;
-signed char confirmed = -1;
+std::atomic<signed char> confirmed { -1 }; // polled in a spin-wait from another thread
 
 bool SecurityWarning() {
     confirmed = -1;
@@ -225,9 +225,9 @@ void Parse(std::string Data, SOCKET CSocket) {
             Terminate = true;
             TCPTerminate = true;
             Data.clear();
-            futures.push_back(std::async(std::launch::async, []() {
-                CoreSend("B" + HTTP::Get("https://backend.beammp.com/servers-info"));
-            }));
+            // LAN-only build: there is no public server list. Return an empty
+            // list; players join via Direct Connect (IP:port).
+            CoreSend("B[]");
         }
         break;
     case 'C':
@@ -236,7 +236,7 @@ void Parse(std::string Data, SOCKET CSocket) {
         break;
     case 'O': // open default browser with URL
         if (IsAllowedLink(Data.substr(1))) {
-#if defined(__linux)
+#if defined(__linux__)
             if (char* browser = getenv("BROWSER"); browser != nullptr && !std::string_view(browser).empty()) {
                 pid_t pid;
                 auto arg = Data.substr(1);

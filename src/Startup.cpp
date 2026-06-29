@@ -34,6 +34,11 @@ int ProxyPort = 0;
 
 namespace fs = std::filesystem;
 
+// Combined-host build: the launcher now links the server library, which ALSO defines a global
+// ::Version (BeamMP-Server/include/Common.h). Wrap the launcher's local Version (+ its helpers,
+// all used only in this TU) in an anonymous namespace so it has internal linkage and can't
+// collide with the server's at link time (was LNK2005 "Version::Version already defined").
+namespace {
 struct Version {
     uint8_t major;
     uint8_t minor;
@@ -73,6 +78,7 @@ Version::Version(uint8_t major, uint8_t minor, uint8_t patch)
 Version::Version(const std::array<uint8_t, 3>& v)
     : Version(v[0], v[1], v[2]) {
 }
+} // anonymous namespace (launcher-local Version, combined-host build)
 
 beammp_fs_string GetEN() {
 #if defined(_WIN32)
@@ -90,7 +96,13 @@ std::string GetPatch() {
 }
 
 beammp_fs_string GetEP(const beammp_fs_char* P) {
-    static beammp_fs_string Ret = [&]() {
+    static beammp_fs_string Ret = [&]() -> beammp_fs_string {
+        if (P == nullptr) {
+            // Called before initialization (GetEP(argv[0])). Constructing a string from a null
+            // pointer is UB (silent crash), so return empty instead -- the caller (addToLog) then
+            // just opens a relative path. main() now primes this with argv[0] before any logging.
+            return beammp_fs_string {};
+        }
         beammp_fs_string path(P);
         return path.substr(0, path.find_last_of(beammp_wide("\\/")) + 1);
     }();
@@ -178,19 +190,17 @@ void URelaunch() {
 #endif
 
 void CheckName() {
-#if defined(_WIN32)
-    std::wstring DN = GetEN(), CDir = Utils::ToWString(options.executable_name), FN = CDir.substr(CDir.find_last_of('\\') + 1);
-#elif defined(__linux__)
-    std::string DN = GetEN(), CDir = options.executable_name, FN = CDir.substr(CDir.find_last_of('/') + 1);
-#endif
-    if (FN != DN) {
-        if (fs::exists(DN))
-            fs::remove(DN.c_str());
-        if (fs::exists(DN))
-            ReLaunch();
-        fs::rename(FN.c_str(), DN.c_str());
-        URelaunch();
-    }
+    // LAN build: do NOT rename the running executable.
+    //
+    // Upstream renamed the exe to GetEN() ("BeamMP-Launcher.exe") and relaunched itself whenever it
+    // was started under any other filename -- part of the auto-update flow (so a freshly-downloaded
+    // launcher would take over the canonical name). This LAN build updates manually and is shipped
+    // under explicit names (the combined host exe, versioned diagnostic builds, ...) that the user
+    // pins in shortcuts. Auto-renaming clobbered those names, broke the shortcuts, and -- in
+    // --combined/--server-only -- would relaunch into the wrong mode. The exe name has no bearing on
+    // functionality (the game reaches the launcher over the local proxy, not by filename), so the
+    // rename is simply skipped: whatever name you launch as is kept.
+    debug("CheckName: skipped (LAN build keeps the launched filename: '" + options.executable_name + "').");
 }
 
 #if defined(_WIN32)
@@ -331,74 +341,10 @@ bool VerifySignature(const std::filesystem::path& filePath)
 #endif
 
 void CheckForUpdates(const std::string& CV) {
-    std::string LatestHash = HTTP::Get("https://backend.beammp.com/sha/launcher?branch=" + Branch + "&pk=" + PublicKey);
-    std::string LatestVersion = HTTP::Get(
-        "https://backend.beammp.com/version/launcher?branch=" + Branch + "&pk=" + PublicKey);
-
-    std::regex sha256_pattern(R"(^[a-fA-F0-9]{64}$)");
-    std::smatch match;
-
-    if (LatestHash.length() != 64 || !std::regex_match(LatestHash, match, sha256_pattern)) {
-        error("Invalid hash from backend, skipping update check.");
-        debug("Launcher hash in question: " + LatestHash);
-        return;
-    }
-
-    transform(LatestHash.begin(), LatestHash.end(), LatestHash.begin(), ::tolower);
-    beammp_fs_string BP(GetBP() / GetEN()), Back(GetBP() / beammp_wide("BeamMP-Launcher.back"));
-
-    std::string FileHash = Utils::GetSha256HashReallyFastFile(BP);
-
-    if (FileHash != LatestHash && IsOutdated(Version(VersionStrToInts(GetVer() + GetPatch())), Version(VersionStrToInts(LatestVersion)))) {
-        if (!options.no_update) {
-            info("Launcher update " + LatestVersion + " found!");
-#if defined(__linux__)
-            error("Auto update is NOT implemented for the Linux version. Please update manually ASAP as updates contain security patches.");
-#else
-            info("Downloading Launcher update " + LatestHash);
-            std::wstring DownloadLocation = GetBP() / (beammp_wide("new_") + GetEN());
-            if (HTTP::Download(
-                    "https://backend.beammp.com/builds/launcher?download=true"
-                    "&pk="
-                        + PublicKey + "&branch=" + Branch,
-                    DownloadLocation, LatestHash)) {
-                if (!VerifySignature(DownloadLocation) || !CheckThumbprint(DownloadLocation)) {
-                    std::error_code ec;
-                    fs::remove(DownloadLocation, ec);
-                    if (ec) {
-                        error("Failed to remove broken launcher update");
-                    }
-                    throw std::runtime_error("The authenticity of the updated launcher could not be verified, it was corrupted or tampered with.");
-                }
-
-                info("Update signature is valid");
-
-                std::error_code ec;
-                fs::remove(Back, ec);
-                if (ec == std::errc::permission_denied) {
-                    error("Failed to remove old backup file: " + ec.message() + ". Using alternative name.");
-                    fs::rename(BP, Back + beammp_wide(".") + Utils::ToWString(FileHash.substr(0, 8)));
-                } else {
-                    fs::rename(BP, Back);
-                }
-                fs::rename(GetBP() / (beammp_wide("new_") + GetEN()), BP);
-                URelaunch();
-            } else {
-                if (fs::exists(DownloadLocation)) {
-                    std::error_code error_code;
-                    fs::remove(DownloadLocation, error_code);
-                    if (error_code) {
-                        error("Failed to remove broken launcher update");
-                    }
-                }
-                throw std::runtime_error("Failed to download the launcher update! Please try manually updating it, https://docs.beammp.com/FAQ/Update-launcher/");
-            }
-#endif
-        } else {
-            warn("Launcher update was found, but not updating because --no-update or --dev was specified.");
-        }
-    } else
-        info("Launcher version is up to date. Latest version: " + LatestVersion);
+    // LAN-only build: no backend, so there is no update check. The launcher is
+    // distributed and updated manually for LAN use.
+    (void)CV;
+    info("LAN-only build: launcher auto-update disabled.");
     TraceBack++;
 }
 
@@ -434,9 +380,21 @@ void LinuxPatch() {
 #if defined(_WIN32)
 
 void InitLauncher() {
-    SetConsoleTitleA(("BeamMP Launcher v" + std::string(GetVer()) + GetPatch()).c_str());
+    SetConsoleTitleA(("BeamMP LAN Launcher v" + std::string(GetVer()) + GetPatch()).c_str());
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT);
+    // Disable console QuickEdit Mode. With it on (the Windows default), clicking or selecting text in
+    // the window drops the console into "mark" mode and BLOCKS the process until a keypress -- which
+    // is exactly why the combined host sometimes froze until you hit Enter. ENABLE_EXTENDED_FLAGS is
+    // required for the QuickEdit bit to take effect; other input flags are preserved.
+    {
+        HANDLE hConsoleIn = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD ConsoleMode = 0;
+        if (hConsoleIn != nullptr && hConsoleIn != INVALID_HANDLE_VALUE && GetConsoleMode(hConsoleIn, &ConsoleMode)) {
+            ConsoleMode = (ConsoleMode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
+            SetConsoleMode(hConsoleIn, ConsoleMode);
+        }
+    }
     debug("Launcher Version : " + GetVer() + GetPatch());
     CheckName();
     LinuxPatch();
@@ -446,7 +404,7 @@ void InitLauncher() {
 #elif defined(__linux__)
 
 void InitLauncher() {
-    info("BeamMP Launcher v" + GetVer() + GetPatch());
+    info("BeamMP LAN Launcher v" + GetVer() + GetPatch());
     CheckName();
     CheckLocalKey();
     CheckForUpdates(std::string(GetVer()) + GetPatch());
@@ -458,22 +416,15 @@ size_t DirCount(const fs::path& path) {
 }
 
 void CheckMP(const beammp_fs_string& Path) {
-    if (!fs::exists(Path))
-        return;
-    size_t c = DirCount(fs::path(Path));
-    try {
-        for (auto& p : fs::directory_iterator(Path)) {
-            if (p.exists() && !p.is_directory()) {
-                std::string Name = p.path().filename().string();
-                for (char& Ch : Name)
-                    Ch = char(tolower(Ch));
-                if (Name != "beammp.zip")
-                    fs::remove(p.path());
-            }
-        }
-    } catch (...) {
-        fatal("We were unable to clean the multiplayer mods folder! Is the game still running or do you have something open in that folder?");
-    }
+    // LAN-only build: PERSIST synced mods between sessions.
+    // Previously this deleted every file in mods/multiplayer (except beammp.zip)
+    // on each launch, which forced the entire mod set to be re-copied (and, if
+    // the game had also wiped them, re-downloaded) every session. We now keep
+    // them so returning to the server is fast. The sync step skips re-copying
+    // mods already present, and the game's session cleanup no longer deletes
+    // them either. Note: if you REMOVE mods from the server, stale client copies
+    // will linger here -- clear mods/multiplayer manually in that case.
+    (void)Path;
 }
 
 void EnableMP() {
@@ -506,6 +457,41 @@ void EnableMP() {
     }
 }
 
+// LAN-only build: if a new crash report appeared since our last launch, BeamNG crashed last
+// session. The common case is the base-game "exceeded the allocated budget" crash (exit
+// 0xC0000005) on map-load with too-large a mod set -- a BeamNG ENGINE limit, NOT system RAM and
+// NOT this mod. Warn loudly in the launcher console so the host trims a mod instead of guessing.
+// Uses a marker FILE (compares file mtimes, avoiding C++17 file_time<->system_clock conversion).
+static void WarnIfLastSessionCrashed() {
+    try {
+        auto crashDir = GetGamePath() / beammp_wide("temp/crashReports");
+        auto marker = CachingDirectory / "last_launch.marker";
+        bool haveMarker = fs::exists(marker);
+        auto markerTime = haveMarker ? fs::last_write_time(marker) : fs::file_time_type::min();
+        bool crashed = false;
+        if (haveMarker && fs::is_directory(crashDir)) { // is_directory => exists + a dir (avoids a file false-positive)
+            std::error_code ec;
+            for (auto it = fs::directory_iterator(crashDir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                std::error_code tec;
+                auto t = fs::last_write_time(it->path(), tec);
+                if (!tec && t > markerTime) { crashed = true; break; }
+            }
+        }
+        // (re)touch the marker so the NEXT launch only counts crashes newer than this launch
+        { std::ofstream m(marker.string(), std::ios::trunc); m << "launch"; }
+        if (crashed) {
+            warn("====================================================================");
+            warn("BeamNG CRASHED during your last session (a new crash report appeared).");
+            warn("If it crashed while LOADING THE MAP, your mod set is over BeamNG's resource");
+            warn("budget -- exit 0xC0000005, a base-game ENGINE limit, NOT RAM and NOT this mod.");
+            warn("Fix: remove the largest / last-added mod from the server, then rejoin.");
+            warn("====================================================================");
+        }
+    } catch (const std::exception& e) {
+        debug(std::string("crash-history check skipped: ") + e.what());
+    }
+}
+
 void PreGame(const beammp_fs_string& GamePath) {
     std::string GameVer = CheckVer(GamePath);
     info("Game Version : " + GameVer);
@@ -513,51 +499,81 @@ void PreGame(const beammp_fs_string& GamePath) {
     CheckMP(GetGamePath() / beammp_wide("mods/multiplayer"));
     info(beammp_wide("Game user path: ") + beammp_fs_string(GetGamePath()));
 
-    if (!options.no_download) {
-        std::string LatestHash = HTTP::Get("https://backend.beammp.com/sha/mod?branch=" + Branch + "&pk=" + PublicKey);
-        transform(LatestHash.begin(), LatestHash.end(), LatestHash.begin(), ::tolower);
-        LatestHash.erase(std::remove_if(LatestHash.begin(), LatestHash.end(),
-                             [](auto const& c) -> bool { return !std::isalnum(c); }),
-            LatestHash.end());
+    // LAN-only build: remove any mods a previous session flagged as no-longer-on-server
+    // now -- before BeamNG launches -- instead of mid-session, which fired file-change
+    // churn that broke the active map's mount and forced a relaunch.
+    ProcessPendingModRemovals();
 
-        std::regex sha256_pattern(R"(^[a-fA-F0-9]{64}$)");
-        std::smatch match;
+    // Heads-up if BeamNG crashed last session (usually the map-load mod/texture budget crash).
+    WarnIfLastSessionCrashed();
 
-        if (LatestHash.length() != 64 || !std::regex_match(LatestHash, match, sha256_pattern)) {
-            error("Invalid hash from backend, skipping mod update check.");
-            debug("Mod hash in question: " + LatestHash);
-            return;
+    // LAN-only build: never download the mod from the backend. Instead install
+    // the BeamMP.zip that ships next to the launcher executable. Pass
+    // --no-download to skip installation entirely if you manage the mod yourself.
+    if (options.no_download) {
+        info("--no-download set: skipping BeamMP mod installation.");
+        return;
+    }
+
+    try {
+        if (!fs::exists(GetGamePath() / beammp_wide("mods/multiplayer"))) {
+            fs::create_directories(GetGamePath() / beammp_wide("mods/multiplayer"));
         }
+    } catch (std::exception& e) {
+        fatal(e.what());
+    }
 
-        try {
-            if (!fs::exists(GetGamePath() / beammp_wide("mods/multiplayer"))) {
-                fs::create_directories(GetGamePath() / beammp_wide("mods/multiplayer"));
-            }
-            EnableMP();
-        } catch (std::exception& e) {
-            fatal(e.what());
-        }
 #if defined(_WIN32)
-        std::wstring ZipPath(GetGamePath() / LR"(mods\multiplayer\BeamMP.zip)");
+    beammp_fs_string DestZip(GetGamePath() / LR"(mods\multiplayer\BeamMP.zip)");
 #elif defined(__linux__)
-        // Linux version of the game cant handle mods with uppercase names
-        std::string ZipPath(GetGamePath() / R"(mods/multiplayer/beammp.zip)");
+    // Linux version of the game cant handle mods with uppercase names
+    beammp_fs_string DestZip(GetGamePath() / R"(mods/multiplayer/beammp.zip)");
 #endif
+    beammp_fs_string SrcZip(beammp_wide("BeamMP.zip"));
 
-        std::string FileHash = fs::exists(ZipPath) ? Utils::GetSha256HashReallyFastFile(ZipPath) : "";
-
-        if (FileHash != LatestHash) {
-            info("Downloading BeamMP Update " + LatestHash);
-            HTTP::Download("https://backend.beammp.com/builds/client?download=true"
-                           "&pk="
-                    + PublicKey + "&branch=" + Branch,
-                ZipPath, LatestHash);
+    std::error_code ec;
+    if (fs::exists(SrcZip)) {
+        // LAN-only build: only (re)install the mod when it actually changed.
+        // Overwriting the zip on every launch makes BeamNG see the mod as
+        // deleted+recreated and re-mount it mid-startup, which breaks loading of
+        // the vehicle-side extensions (positionVE etc.) and the multiplayer UI.
+        // Compare size, then hash, and skip the copy if they already match.
+        bool NeedsCopy = !fs::exists(DestZip);
+        if (!NeedsCopy) {
+            std::error_code sec;
+            auto SrcSize = fs::file_size(SrcZip, sec);
+            auto DestSize = fs::file_size(DestZip, sec);
+            if (sec || SrcSize != DestSize) {
+                NeedsCopy = true;
+            } else {
+                NeedsCopy = Utils::GetSha256HashReallyFastFile(SrcZip)
+                    != Utils::GetSha256HashReallyFastFile(DestZip);
+            }
         }
-
-        beammp_fs_string Target(GetGamePath() / beammp_wide("mods/unpacked/beammp"));
-
-        if (fs::is_directory(Target) && !fs::is_directory(Target + beammp_wide("/.git"))) {
-            fs::remove_all(Target);
+        if (!NeedsCopy) {
+            info("BeamMP mod already up to date in mods/multiplayer (skipping reinstall).");
+        } else {
+            fs::copy_file(SrcZip, DestZip, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                error("Failed to install bundled BeamMP.zip: " + ec.message());
+            } else {
+                info("Installed local BeamMP mod into mods/multiplayer.");
+            }
         }
+    } else if (!fs::exists(DestZip)) {
+        warn("No BeamMP.zip found next to the launcher and none present in mods/multiplayer. "
+             "Place the LAN mod zip next to the launcher (or in mods/multiplayer) before joining.");
+    }
+
+    try {
+        EnableMP();
+    } catch (std::exception& e) {
+        fatal(e.what());
+    }
+
+    beammp_fs_string Target(GetGamePath() / beammp_wide("mods/unpacked/beammp"));
+
+    if (fs::is_directory(Target) && !fs::is_directory(Target + beammp_wide("/.git"))) {
+        fs::remove_all(Target);
     }
 }

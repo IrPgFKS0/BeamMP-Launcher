@@ -13,3 +13,9 @@ bin/
 compile_commands.json
 key
 out/
+bin-linux/
+build/
+dist/
+.vcpkg-cache/
+.DS_Store
+name

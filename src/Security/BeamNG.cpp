@@ -46,7 +46,8 @@ LONG OpenKey(HKEY root, const char* path, PHKEY hKey) {
     return RegOpenKeyEx(root, reinterpret_cast<LPCSTR>(path), 0, KEY_READ, hKey);
 }
 std::wstring QueryKey(HKEY hKey, int ID) {
-    wchar_t* achKey; // buffer for subkey name
+    wchar_t achKey[MAX_KEY_LENGTH + 1] = {}; // buffer for subkey name (was an uninitialized
+                                             // wild pointer that RegEnumKeyExW wrote into)
     DWORD cbName; // size of name string
     TCHAR achClass[MAX_PATH] = TEXT(""); // buffer for class name
     DWORD cchClassName = MAX_PATH; // size of class string

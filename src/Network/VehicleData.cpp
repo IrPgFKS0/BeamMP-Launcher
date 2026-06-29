@@ -20,6 +20,7 @@
 #endif
 
 #include "Logger.h"
+#include "CombinedHost.h" // --combined: g_CombinedMode + in-memory link send/recv
 #include <array>
 #include <string>
 
@@ -27,6 +28,12 @@ SOCKET UDPSock = -1;
 sockaddr_in* ToServer = nullptr;
 
 void UDPSend(std::string Data) {
+    if (g_CombinedMode) {
+        // In-memory link: hand the raw payload to the in-process server. No ClientID:/prefix and no
+        // compression -- HandleVirtualUDP already knows the host client and feeds GlobalParser directly.
+        CombinedServerSendUDP(Data);
+        return;
+    }
     if (ClientID == -1 || UDPSock == -1)
         return;
     if (Data.length() > 400) {
@@ -62,6 +69,17 @@ void UDPParser(std::string_view Packet) {
     }
 }
 void UDPRcv() {
+    if (g_CombinedMode) {
+        // In-memory link: block for one server->client UDP message. Empty => link closed; stop the
+        // recv loop (otherwise CombinedClientRecvUDP would return instantly and busy-spin).
+        std::string Msg = CombinedClientRecvUDP();
+        if (Msg.empty()) {
+            Terminate = true;
+            return;
+        }
+        UDPParser(std::string_view(Msg.data(), Msg.size()));
+        return;
+    }
     sockaddr_in FromServer {};
 #if defined(_WIN32)
     int clientLength = sizeof(FromServer);
@@ -93,7 +111,37 @@ void UDPClientMain(const std::string& IP, int Port) {
     ToServer->sin_port = htons(Port);
     inet_pton(AF_INET, IP.c_str(), &ToServer->sin_addr);
     UDPSock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (!magic.empty())
+    if (UDPSock == -1) { // matches the existing UDPSock validity checks; INVALID_SOCKET isn't defined on Linux
+        // #2: without this the UDP session dies silently -- UDPSend() just no-ops on an invalid
+        // socket and nobody ever learns positions stopped flowing.
+        error("Failed to create UDP socket: " + std::to_string(
+#ifdef _WIN32
+            WSAGetLastError()
+#else
+            errno
+#endif
+            ));
+#ifdef _WIN32
+        WSACleanup(); // balance the WSAStartup at the top of UDPClientMain
+#endif
+        return;
+    }
+    // LAN: bump the UDP receive buffer so a burst of position packets (many cars x physicsRateSend
+    // x every player, relayed by the server) doesn't overflow the OS default (~64-256KB) and get
+    // silently dropped -- the cause of remote-car drift under load. 8MB holds thousands of the
+    // small position packets. The OS may cap this (Linux net.core.rmem_max) -- see the LAN docs.
+    if (!g_CombinedMode) {
+        // Combined host: this UDP socket is unused (the in-memory bridge carries UDP), so its receive
+        // buffer has no effect -- skip it so it isn't misleading. The SERVER's own receive buffer
+        // (for LAN2's real network UDP) still matters and is set server-side. See LAN-TUNING.md.
+        int rcvbuf = 8 * 1024 * 1024;
+        setsockopt(UDPSock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+    }
+    // The magic UDP registration teaches the server which UDP endpoint maps to this client. In
+    // combined mode there is no endpoint -- the in-process server already has the host client bound
+    // to the in-memory link (HandleVirtualUDP) -- so skip it (otherwise we'd push magic packets the
+    // server would mis-parse). The UDP socket created above is left unused; the bridge handles I/O.
+    if (!g_CombinedMode && !magic.empty())
         for (int i = 0; i < 10; i++)
             UDPSend(magic);
     GameSend("P" + std::to_string(ClientID));

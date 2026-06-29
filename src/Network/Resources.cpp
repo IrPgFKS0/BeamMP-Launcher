@@ -26,7 +26,9 @@
 #endif
 
 #include "Logger.h"
+#include "Options.h"
 #include "Startup.h"
+#include "CombinedHost.h" // --combined: g_CombinedMode (host mounts local mods instead of downloading)
 #include <Utils.h>
 #include <atomic>
 #include <cmath>
@@ -106,17 +108,17 @@ std::string Auth(SOCKET Sock) {
 
     Res = TCPRcv(Sock);
 
-    if (Res[0] == 'E' || Res[0] == 'K') {
-        Abord();
-        CoreSend("L");
-        return "";
-    }
-
     if (Res.empty() || Res == "-") {
         info("Didn't Receive any mods...");
         CoreSend("L");
         TCPSend("Done", Sock);
         info("Done!");
+        return "";
+    }
+
+    if (Res[0] == 'E' || Res[0] == 'K') { // check emptiness first (above) so Res[0] is always a real byte
+        Abord();
+        CoreSend("L");
         return "";
     }
     return Res;
@@ -133,7 +135,7 @@ float DownloadSpeed = 0;
 
 void AsyncUpdate(uint64_t& Rcv, uint64_t Size, const std::string& Name) {
     do {
-        double pr = double(Rcv) / double(Size) * 100;
+        double pr = (Size > 0) ? (double(Rcv) / double(Size) * 100) : 100.0; // avoid nan/inf on a zero-byte mod
         std::string Per = std::to_string(trunc(pr * 10) / 10);
         std::string SpeedString = "";
         if (DownloadSpeed > 0.01) {
@@ -163,7 +165,11 @@ std::vector<char> TCPRcvRaw(SOCKET Sock, uint64_t& GRcv, uint64_t Size) {
     int i = 0;
     do {
         // receive at most some MB at a time
-        int Len = std::min(int(Size - Rcv), 1 * 1024 * 1024);
+        // NOTE: compute the min in 64-bit *before* casting to int. Casting
+        // (Size - Rcv) to int first overflows for files >2GB (e.g. a 3.5GB map),
+        // producing a negative length that makes RecvWaitAll return 0 and the
+        // download abort with "Recv returned: 0".
+        int Len = int(std::min<uint64_t>(Size - Rcv, 1 * 1024 * 1024));
         int Temp = RecvWaitAll(Sock, &File[Rcv], Len);
         if (Temp == -1 || Temp == 0) {
             debug("Recv returned: " + std::to_string(Temp));
@@ -190,6 +196,55 @@ std::vector<char> TCPRcvRaw(SOCKET Sock, uint64_t& GRcv, uint64_t Size) {
         ++i;
     } while (Rcv < Size && !Terminate);
     return File;
+}
+// Streaming variant of TCPRcvRaw: writes received bytes straight to `Out`
+// instead of buffering the whole file in RAM. Required for very large mods
+// (e.g. a 3.5GB map) and, more importantly, to avoid out-of-memory crashes
+// when many big mods are synced while the game is also loading them. Peak
+// memory here is a single 1MB chunk buffer regardless of file size.
+bool TCPRcvToFile(SOCKET Sock, uint64_t& GRcv, uint64_t Size, std::ofstream& Out) {
+    if (Sock == -1) {
+        Terminate = true;
+        UUl("Invalid Socket");
+        return false;
+    }
+    std::vector<char> Buf(1 * 1024 * 1024);
+    uint64_t Rcv = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    int i = 0;
+    while (Rcv < Size && !Terminate) {
+        int Len = int(std::min<uint64_t>(Size - Rcv, Buf.size()));
+        int Temp = RecvWaitAll(Sock, Buf.data(), Len);
+        if (Temp == -1 || Temp == 0) {
+            debug("Recv returned: " + std::to_string(Temp));
+            if (Temp == -1) {
+                error("Socket error during download: " + std::to_string(WSAGetLastError()));
+            }
+            UUl("Socket Closed Code 1");
+            KillSocket(Sock);
+            Terminate = true;
+            return false;
+        }
+        Out.write(Buf.data(), Temp);
+        if (!Out) {
+            error("Failed to write downloaded data to disk (out of disk space?)");
+            Terminate = true;
+            return false;
+        }
+        Rcv += Temp;
+        GRcv += Temp;
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        if (ms > 0) {
+            DownloadSpeed = (double(Rcv * 8) / double(ms)) / 1000;
+        }
+        if (i % 8 == 0) {
+            debug("Download speed: " + std::to_string(uint32_t(DownloadSpeed)) + "Mbit/s");
+        }
+        ++i;
+    }
+    return true;
 }
 void MultiKill(SOCKET Sock, SOCKET Sock1) {
     KillSocket(Sock1);
@@ -221,34 +276,9 @@ SOCKET InitDSock() {
     return DSock;
 }
 
-std::vector<char> SingleNormalDownload(SOCKET MSock, uint64_t Size, const std::string& Name) {
-    DownloadSpeed = 0;
-
-    uint64_t GRcv = 0;
-
-    std::thread Au([&] { AsyncUpdate(GRcv, Size, Name); });
-
-    const std::vector<char> MData = TCPRcvRaw(MSock, GRcv, Size);
-
-    if (MData.empty()) {
-        KillSocket(MSock);
-        Terminate = true;
-        Au.join();
-        return {};
-    }
-
-    // ensure that GRcv is good before joining the async update thread
-    GRcv = MData.size();
-    if (GRcv != Size) {
-        error("Something went wrong during download; didn't get enough data. Expected " + std::to_string(Size) + " bytes, got " + std::to_string(GRcv) + " bytes instead");
-        Terminate = true;
-        Au.join();
-        return {};
-    }
-
-    Au.join();
-    return MData;
-}
+// NOTE: SingleNormalDownload was removed (dead code). The single-socket mod
+// download now streams straight to disk via TCPRcvToFile (see NewSyncResources).
+// MultiDownload below is still used by the legacy (non-LAN) sync path.
 
 std::vector<char> MultiDownload(SOCKET MSock, SOCKET DSock, uint64_t Size, const std::string& Name) {
     DownloadSpeed = 0;
@@ -385,6 +415,54 @@ void UpdateModUsage(const std::string& fileName) {
 }
 
 
+// LAN-only build: delete mods that a previous session's sync flagged (those the
+// server had dropped). Called from PreGame at startup, BEFORE BeamNG launches, so the
+// game never sees mid-session deletions -- which is what broke the active map's mount
+// and forced a relaunch. Best-effort; clears the pending list when done.
+void ProcessPendingModRemovals() {
+    try {
+        auto pendingPath = CachingDirectory / "pending_mod_removals.txt";
+        // Read the queued names first so we can report the count BEFORE the game launches --
+        // visible even when there's nothing to do, so the pre-launch prune phase is obvious in
+        // the launcher log instead of looking like removal only happens on connect.
+        std::vector<std::string> pending;
+        if (fs::exists(pendingPath)) {
+            std::ifstream pf(pendingPath);
+            std::string fn;
+            while (std::getline(pf, fn)) {
+                while (!fn.empty() && (fn.back() == '\r' || fn.back() == '\n' || fn.back() == ' ' || fn.back() == '\t'))
+                    fn.pop_back();
+                if (!fn.empty())
+                    pending.push_back(fn);
+            }
+        }
+        info("Processing " + std::to_string(pending.size()) + " pending mod removal(s) before launch");
+        if (pending.empty())
+            return;
+        auto MpDir = GetGamePath() / beammp_wide("mods/multiplayer");
+        for (const auto& fn : pending) {
+            std::string lower = fn;
+            for (char& c : lower)
+                c = char(tolower(c));
+            if (lower == "beammp.zip")
+                continue; // never remove the mod itself
+            std::error_code rec;
+            auto target = MpDir / fn;
+            if (fs::exists(target)) {
+                fs::remove(target, rec);
+                if (!rec)
+                    info("Removed mod no longer on server: " + fn);
+                else
+                    debug("Could not remove pending mod '" + fn + "': " + rec.message());
+            }
+        }
+        std::error_code dec;
+        fs::remove(pendingPath, dec);
+    } catch (const std::exception& e) {
+        debug(std::string("Pending mod removal skipped: ") + e.what());
+    }
+}
+
 void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<ModInfo> ModInfos) {
     if (ModInfos.empty()) {
         CoreSend("L");
@@ -399,6 +477,108 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
     info("Checking Resources...");
 
     CheckForDir();
+
+    // LAN-only build: mods the server no longer lists must leave the client's
+    // persisted mods/multiplayer -- but NOT mid-session. BeamNG already has them
+    // mounted, and deleting them now fires onFilesChanged churn that breaks the
+    // active map's mount (forcing a relaunch). So just RECORD them here;
+    // ProcessPendingModRemovals() deletes them at the next launcher startup, before
+    // BeamNG is started. They linger (inert -- not in the server's set, so never
+    // spawned) for one extra session. Updated mods still go through the normal flow:
+    // a changed hash is a cache miss -> re-download -> overwrite.
+    try {
+        auto MpDir = GetGamePath() / beammp_wide("mods/multiplayer");
+        std::vector<std::string> toRemove;
+        if (fs::exists(MpDir)) {
+            for (const auto& entry : fs::directory_iterator(MpDir)) {
+                if (!entry.is_regular_file() || entry.path().extension() != ".zip")
+                    continue;
+                std::string fn = entry.path().filename().string();
+                std::string lower = fn;
+                for (char& c : lower)
+                    c = char(tolower(c));
+                if (lower == "beammp.zip")
+                    continue;
+                bool onServer = false;
+                for (const auto& mod : ModInfos) {
+                    std::string expect = mod.FileName;
+                    for (char& c : expect)
+                        c = char(tolower(c));
+                    if (expect == lower) {
+                        onServer = true;
+                        break;
+                    }
+                }
+                if (!onServer)
+                    toRemove.push_back(fn);
+            }
+        }
+        // Overwrite the pending list with this sync's set (authoritative for the
+        // server we just synced with). Cleared when there's nothing to remove.
+        auto pendingPath = CachingDirectory / "pending_mod_removals.txt";
+        std::error_code pec;
+        if (toRemove.empty()) {
+            fs::remove(pendingPath, pec);
+        } else {
+            std::ofstream pf(pendingPath, std::ios::trunc);
+            for (const auto& fn : toRemove) {
+                pf << fn << "\n";
+                info("Mod no longer on server, will remove on next launch: " + fn);
+            }
+        }
+    } catch (const std::exception& e) {
+        debug(std::string("Mod prune scheduling skipped: ") + e.what());
+    }
+
+    // LAN-only build: keep the launcher cache (CachingDirectory) mirrored to the
+    // server's current set, so it holds exactly one (current) version of each
+    // served mod. The cache is what loads/updates mods/multiplayer, so stale
+    // old-hash copies and mods the server dropped would otherwise pile up
+    // (38GB+ observed). Remove any "<stem>-<hash8>.zip" cache file that isn't the
+    // current version of a served mod. Plainly-named files (e.g. manually-placed
+    // protected mods) don't match the pattern and are left untouched.
+    try {
+        std::vector<std::string> expectedCache;
+        expectedCache.reserve(ModInfos.size());
+        for (const auto& mod : ModInfos) {
+            if (mod.Hash.length() < 8)
+                continue;
+            auto p = std::filesystem::path(mod.FileName);
+            expectedCache.push_back(p.stem().string() + "-" + mod.Hash.substr(0, 8) + p.extension().string());
+        }
+        auto isCacheName = [](const std::string& n) {
+            // matches "<stem>-<8 hex>.zip"
+            if (n.size() < 14 || n.substr(n.size() - 4) != ".zip" || n[n.size() - 13] != '-')
+                return false;
+            for (size_t i = n.size() - 12; i < n.size() - 4; ++i) {
+                char c = n[i];
+                bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!hex)
+                    return false;
+            }
+            return true;
+        };
+        for (const auto& entry : fs::directory_iterator(CachingDirectory)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".zip")
+                continue;
+            const std::string name = entry.path().filename().string();
+            bool keep = !isCacheName(name); // leave non-cache-named files alone
+            for (const auto& e : expectedCache) {
+                if (e == name) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (keep)
+                continue;
+            std::error_code rec;
+            fs::remove(entry.path(), rec);
+            if (!rec)
+                info("Removed stale cached mod: " + name);
+        }
+    } catch (const std::exception& e) {
+        debug(std::string("Cache prune skipped: ") + e.what());
+    }
 
     std::string t;
     for (const auto& mod : ModInfos) {
@@ -445,7 +625,71 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
         }
         auto FileName = std::filesystem::path(ModInfoIter->FileName).stem().string() + "-" + ModInfoIter->Hash.substr(0, 8) + std::filesystem::path(ModInfoIter->FileName).extension().string();
         auto PathToSaveTo = (CachingDirectory / FileName);
-        if (fs::exists(PathToSaveTo) && Utils::GetSha256HashReallyFastFile(PathToSaveTo) == ModInfoIter->Hash) {
+
+        if (g_CombinedMode) {
+            // Combined host: the ENTIRE mod set is already on this machine -- the in-process server
+            // serves it from ./Resources/Client. Never "download" it from ourselves over the link
+            // (the virtual client has no socket for the file transfer, which is exactly what failed:
+            // "Failed to send raw data to client"). Mount the local file into mods/multiplayer
+            // directly. If it's already there and current (it usually is, from prior sessions), do
+            // nothing. This skips the cache entirely for the host.
+            try {
+                auto MpDir = GetGamePath() / beammp_wide("mods/multiplayer");
+                if (!fs::exists(MpDir)) {
+                    fs::create_directories(MpDir);
+                }
+                auto Dest = MpDir / std::filesystem::path(ModInfoIter->FileName);
+                std::error_code ec;
+                bool current = fs::exists(Dest)
+                    && fs::file_size(Dest, ec) == ModInfoIter->FileSize && !ec
+                    && (!options.full_mod_hash || Utils::GetSha256HashReallyFastFile(Dest) == ModInfoIter->Hash);
+                if (!current) {
+                    // Locate the source under the server's client folder (Resources/Client/**).
+                    std::filesystem::path Src;
+                    std::filesystem::path ClientDir = std::filesystem::path("Resources") / "Client";
+                    std::error_code sec;
+                    if (fs::exists(ClientDir)) {
+                        for (auto it = fs::recursive_directory_iterator(ClientDir, sec);
+                             it != fs::recursive_directory_iterator(); ++it) {
+                            if (it->is_regular_file() && it->path().filename() == std::filesystem::path(ModInfoIter->FileName)) {
+                                Src = it->path();
+                                break;
+                            }
+                        }
+                    }
+                    if (Src.empty()) {
+                        // Broken-mod robustness: a single mod missing from Resources/Client must NOT
+                        // abort the host's whole join. Skip it (the host joins without that one mod)
+                        // and continue -- the same graceful degradation stock BeamMP gives a failed
+                        // download, rather than killing the session over one bad/absent file.
+                        warn("Combined host: mod '" + ModInfoIter->FileName + "' not found under Resources/Client; SKIPPING it (host joins without this mod). Check the server's mod set vs Resources/Client.");
+                        continue;
+                    }
+                    std::string Tmp = Dest.string() + ".tmp";
+                    fs::copy_file(Src, Tmp, fs::copy_options::overwrite_existing);
+                    fs::rename(Tmp, Dest);
+                    debug("Combined host: mounted local mod '" + ModInfoIter->FileName + "'");
+                }
+                UpdateUl(false, std::to_string(ModNo) + "/" + std::to_string(TotalMods) + ": " + ModInfoIter->FileName);
+                UpdateModUsage(FileName);
+                WaitForConfirm();
+                continue;
+            } catch (const std::exception& e) {
+                // One mod failing to copy/mount (locked file, transient FS error, oversized/broken zip)
+                // should skip that mod, not tear down the whole host session.
+                warn(std::string("Combined host: local mod mount failed for '") + ModInfoIter->FileName + "': " + e.what() + " -- skipping this mod, continuing the join.");
+                continue;
+            }
+        }
+        // Fast validate (LAN default): the cache file is hash-named (<stem>-<hash8>.zip), so its
+        // filename already encodes the content hash -- existence + exact size is a near-certain
+        // match and avoids re-hashing the entire mod set on every connect (the "Checking
+        // Resources..." delay). --full-mod-hash forces the original full SHA256 re-verification.
+        std::error_code cacheSzEc;
+        if (fs::exists(PathToSaveTo)
+            && (options.full_mod_hash
+                    ? (Utils::GetSha256HashReallyFastFile(PathToSaveTo) == ModInfoIter->Hash)
+                    : (fs::file_size(PathToSaveTo, cacheSzEc) == ModInfoIter->FileSize && !cacheSzEc))) {
             debug("Mod '" + FileName + "' found in cache");
             UpdateUl(false, std::to_string(ModNo) + "/" + std::to_string(TotalMods) + ": " + ModInfoIter->FileName);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -462,11 +706,26 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
 #endif
                 debug("Mod name: " + modname);
                 auto name = std::filesystem::path(GetGamePath()) / "mods/multiplayer" / modname;
-                std::string tmp_name = name.string();
-                tmp_name += ".tmp";
-
-                fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
-                fs::rename(tmp_name, name);
+                // LAN-only build: persist mods between sessions. Only skip the
+                // copy when the file already in mods/multiplayer matches the
+                // authoritative mod by CONTENT (sha256), not just size: a stale
+                // copy of identical size would otherwise never be replaced,
+                // leaving the game to mount outdated vehicle Lua (e.g. a broken
+                // weapons controller that fails to compile and won't fire).
+                // Fast validate (LAN default): trust existence + exact size and skip the copy;
+                // --full-mod-hash adds the full SHA256 (original behavior, also catches the rare
+                // stale same-size copy). Size stays a cheap pre-filter either way.
+                std::error_code sizeEc;
+                if (fs::exists(name)
+                    && fs::file_size(name, sizeEc) == ModInfoIter->FileSize && !sizeEc
+                    && (!options.full_mod_hash || Utils::GetSha256HashReallyFastFile(name) == ModInfoIter->Hash)) {
+                    debug("Mod '" + modname + "' already present in mods/multiplayer, skipping copy");
+                } else {
+                    std::string tmp_name = name.string();
+                    tmp_name += ".tmp";
+                    fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
+                    fs::rename(tmp_name, name);
+                }
                 UpdateModUsage(FileName);
             } catch (std::exception& e) {
                 error("Failed copy to the mods folder! " + std::string(e.what()));
@@ -498,11 +757,26 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
 
                 debug("Mod name: " + modname);
                 auto name = std::filesystem::path(GetGamePath()) / "mods/multiplayer" / modname;
-                std::string tmp_name = name.string();
-                tmp_name += ".tmp";
-
-                fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
-                fs::rename(tmp_name, name);
+                // LAN-only build: persist mods between sessions. Only skip the
+                // copy when the file already in mods/multiplayer matches the
+                // authoritative mod by CONTENT (sha256), not just size: a stale
+                // copy of identical size would otherwise never be replaced,
+                // leaving the game to mount outdated vehicle Lua (e.g. a broken
+                // weapons controller that fails to compile and won't fire).
+                // Fast validate (LAN default): trust existence + exact size and skip the copy;
+                // --full-mod-hash adds the full SHA256 (original behavior, also catches the rare
+                // stale same-size copy). Size stays a cheap pre-filter either way.
+                std::error_code sizeEc;
+                if (fs::exists(name)
+                    && fs::file_size(name, sizeEc) == ModInfoIter->FileSize && !sizeEc
+                    && (!options.full_mod_hash || Utils::GetSha256HashReallyFastFile(name) == ModInfoIter->Hash)) {
+                    debug("Mod '" + modname + "' already present in mods/multiplayer, skipping copy");
+                } else {
+                    std::string tmp_name = name.string();
+                    tmp_name += ".tmp";
+                    fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
+                    fs::rename(tmp_name, name);
+                }
                 UpdateModUsage(FileName);
             } catch (std::exception& e) {
                 error("Failed copy to the mods folder! " + std::string(e.what()));
@@ -544,29 +818,43 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
 
             std::string Name = std::to_string(ModNo) + "/" + std::to_string(TotalMods) + ": " + FName;
 
-            std::vector<char> DownloadedFile = SingleNormalDownload(Sock, ModInfoIter->FileSize, Name);
+            // Stream straight to disk (don't hold the whole mod in RAM).
+            DownloadSpeed = 0;
+            uint64_t GRcv = 0;
+            std::thread Au([&] { AsyncUpdate(GRcv, ModInfoIter->FileSize, Name); });
+            bool DlOk = false;
+            {
+                std::ofstream OutFile(PathToSaveTo, std::ios::binary | std::ios::trunc);
+                if (!OutFile) {
+                    error(beammp_wide("Failed to open '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' for writing"));
+                    Terminate = true;
+                } else {
+                    DlOk = TCPRcvToFile(Sock, GRcv, ModInfoIter->FileSize, OutFile);
+                }
+            }
+            Au.join();
 
-            if (Terminate)
+            if (!DlOk || Terminate)
                 break;
             UpdateUl(false, std::to_string(ModNo) + "/" + std::to_string(TotalMods) + ": " + FName);
 
-            // 1. write downloaded file to disk
+            // verify size and hash. Use the non-throwing file_size overload: a write that failed or was
+            // interrupted can leave the file absent, and the throwing overload would propagate out of the
+            // whole sync routine for a joining player instead of degrading to a clean abort.
             {
-                std::ofstream OutFile(PathToSaveTo, std::ios::binary | std::ios::trunc);
-                OutFile.write(DownloadedFile.data(), DownloadedFile.size());
-                OutFile.flush();
-            }
-            // 2. verify size and hash
-            if (std::filesystem::file_size(PathToSaveTo) != DownloadedFile.size()) {
-                error(beammp_wide("Failed to write the entire file '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' correctly (file size mismatch)"));
-                Terminate = true;
+                std::error_code ec;
+                auto WrittenSize = std::filesystem::file_size(PathToSaveTo, ec);
+                if (ec || WrittenSize != ModInfoIter->FileSize) {
+                    error(beammp_wide("Failed to write the entire file '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' correctly (file size mismatch)"));
+                    Terminate = true;
+                }
             }
 
-            if (Utils::GetSha256HashReallyFastFile(PathToSaveTo) != ModInfoIter->Hash) {
+            if (!Terminate && Utils::GetSha256HashReallyFastFile(PathToSaveTo) != ModInfoIter->Hash) {
                 error(beammp_wide("Failed to write or download the entire file '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' correctly (hash mismatch)"));
                 Terminate = true;
             }
-        } while (fs::file_size(PathToSaveTo) != ModInfoIter->FileSize && !Terminate);
+        } while (!Terminate); // the size mismatch above already sets Terminate; no throwing file_size in the loop condition
         if (!Terminate) {
             if (!fs::exists(GetGamePath() / beammp_wide("mods/multiplayer"))) {
                 fs::create_directories(GetGamePath() / beammp_wide("mods/multiplayer"));
@@ -579,7 +867,13 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
             }
 #endif
 
-            fs::copy_file(PathToSaveTo, std::filesystem::path(GetGamePath()) / "mods/multiplayer" / FName, fs::copy_options::overwrite_existing);
+            // Copy to a temp name and atomically rename into place, so BeamNG's
+            // mod watcher never sees a half-written zip (which produced
+            // "Invalid ZIP file" errors on the first download of large mods).
+            auto destName = std::filesystem::path(GetGamePath()) / "mods/multiplayer" / FName;
+            std::string tmp_name = destName.string() + ".tmp";
+            fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
+            fs::rename(tmp_name, destName);
             UpdateModUsage(FName);
         }
         WaitForConfirm();
@@ -660,10 +954,10 @@ void SyncResources(SOCKET Sock) {
             continue;
         }
         Pos++;
+        if (FS->find_first_not_of("0123456789") != std::string::npos) // validate BEFORE stoull (a non-numeric size field would throw std::invalid_argument)
+            continue;
         auto FileSize = std::stoull(*FS);
         if (fs::exists(PathToSaveTo)) {
-            if (FS->find_first_not_of("0123456789") != std::string::npos)
-                continue;
             if (fs::file_size(PathToSaveTo) == FileSize) {
                 UpdateUl(false, std::to_string(Pos) + "/" + std::to_string(Amount) + ": " + PathToSaveTo.filename().string());
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));

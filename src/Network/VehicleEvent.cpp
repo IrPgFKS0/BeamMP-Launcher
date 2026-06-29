@@ -18,11 +18,13 @@
 #include <cstring>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #endif
 
 #include "Network/network.hpp"
+#include "CombinedHost.h" // --combined: g_CombinedMode + in-memory link send/recv
 
 int LastPort;
 std::string LastIP;
@@ -51,6 +53,12 @@ void UUl(const std::string& R) {
 }
 
 void TCPSend(const std::string& Data, uint64_t Sock) {
+    if (g_CombinedMode) {
+        // In-memory link: hand the raw message to the in-process server's host client. The queue
+        // preserves boundaries, so no 4-byte length header (the server's virtual TCPRcv pops it as-is).
+        CombinedServerSendTCP(Data);
+        return;
+    }
     if (Sock == -1) {
         Terminate = true;
         UUl("Invalid Socket");
@@ -99,34 +107,45 @@ int RecvWaitAll(int sockfd, char *buf, int len) {
 }
 
 std::string TCPRcv(SOCKET Sock) {
-    if (Sock == -1) {
-        Terminate = true;
-        UUl("Invalid Socket");
-        return "";
-    }
-    int32_t Header;
-    int Temp;
-    std::vector<char> Data(sizeof(Header));
-    Temp = RecvWaitAll(Sock, Data.data(), sizeof(Header));
-    if (!CheckBytes(Temp, sizeof(Header))) {
-        UUl("Socket Closed Code 3");
-        return "";
-    }
-    memcpy(&Header, Data.data(), sizeof(Header));
+    std::string Ret;
+    if (g_CombinedMode) {
+        // In-memory link: block for one message from the in-process server (boundaries preserved,
+        // no length header). Empty means the link closed -> stop the read loop.
+        Ret = CombinedClientRecvTCP();
+        if (Ret.empty()) {
+            Terminate = true;
+            return "";
+        }
+    } else {
+        if (Sock == -1) {
+            Terminate = true;
+            UUl("Invalid Socket");
+            return "";
+        }
+        int32_t Header;
+        int Temp;
+        std::vector<char> Data(sizeof(Header));
+        Temp = RecvWaitAll(Sock, Data.data(), sizeof(Header));
+        if (!CheckBytes(Temp, sizeof(Header))) {
+            UUl("Socket Closed Code 3");
+            return "";
+        }
+        memcpy(&Header, Data.data(), sizeof(Header));
 
-    if (!CheckBytes(Temp)) {
-        UUl("Socket Closed Code 4");
-        return "";
-    }
+        if (!CheckBytes(Temp)) {
+            UUl("Socket Closed Code 4");
+            return "";
+        }
 
-    Data.resize(Header, 0);
-    Temp = RecvWaitAll(Sock, Data.data(), Header);
-    if (!CheckBytes(Temp, Header)) {
-        UUl("Socket Closed Code 5");
-        return "";
-    }
+        Data.resize(Header, 0);
+        Temp = RecvWaitAll(Sock, Data.data(), Header);
+        if (!CheckBytes(Temp, Header)) {
+            UUl("Socket Closed Code 5");
+            return "";
+        }
 
-    std::string Ret(Data.data(), Header);
+        Ret.assign(Data.data(), Header);
+    }
 
     if (Ret.substr(0, 4) == "ABG:") {
         auto substr = Ret.substr(4);
@@ -143,7 +162,7 @@ std::string TCPRcv(SOCKET Sock) {
 #ifdef DEBUG
     // debug("Parsing from server -> " + std::to_string(Ret.size()));
 #endif
-    if (Ret[0] == 'E' || Ret[0] == 'K')
+    if (!Ret.empty() && (Ret[0] == 'E' || Ret[0] == 'K')) // guard: Ret can be empty (decompress/closed)
         UUl(Ret.substr(1));
     return Ret;
 }
@@ -151,48 +170,66 @@ std::string TCPRcv(SOCKET Sock) {
 void TCPClientMain(const std::string& IP, int Port) {
     LastIP = IP;
     LastPort = Port;
-    SOCKADDR_IN ServerAddr;
-    int RetCode;
+    if (!g_CombinedMode) {
+        SOCKADDR_IN ServerAddr;
+        int RetCode;
 #ifdef _WIN32
-    WSADATA wsaData;
-    WSAStartup(514, &wsaData); // 2.2
+        WSADATA wsaData;
+        WSAStartup(514, &wsaData); // 2.2
 #endif
-    TCPSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        TCPSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    if (TCPSock == -1) {
-        printf("Client: socket failed! Error code: %d\n", WSAGetLastError());
-        WSACleanup();
-        return;
+        if (TCPSock == -1) {
+            printf("Client: socket failed! Error code: %d\n", WSAGetLastError());
+            WSACleanup();
+            return;
+        }
+
+        ServerAddr.sin_family = AF_INET;
+        ServerAddr.sin_port = htons(Port);
+        inet_pton(AF_INET, IP.c_str(), &ServerAddr.sin_addr);
+        RetCode = connect(TCPSock, (SOCKADDR*)&ServerAddr, sizeof(ServerAddr));
+        if (RetCode != 0) {
+            UlStatus = "UlConnection Failed!";
+            error("Client: connect failed! Error code: " + std::to_string(WSAGetLastError()));
+            KillSocket(TCPSock);
+            WSACleanup();
+            Terminate = true;
+            CoreSend("L");
+            return;
+        }
+        info("Connected!");
+
+        // LAN-only build: disable Nagle's algorithm so small, latency-sensitive
+        // event/control packets are sent to the server immediately.
+        {
+            int NoDelay = 1;
+            if (setsockopt(TCPSock, IPPROTO_TCP, TCP_NODELAY, (const char*)&NoDelay, sizeof(NoDelay)) != 0) {
+                debug("Failed to set TCP_NODELAY on server socket: " + std::to_string(WSAGetLastError()));
+            }
+        }
+
+        char Code = 'C';
+        send(TCPSock, &Code, 1, 0);
+    } else {
+        // In-memory link: no socket, no connect. The virtual client skips the server's connection-
+        // type routing byte ('C'), so don't send it -- its auth begins at the version handshake.
+        // TCPSock stays -1; the bridge-aware TCPSend/TCPRcv ignore it.
+        info("Combined host: client attached over the in-memory link (no socket).");
     }
-
-    ServerAddr.sin_family = AF_INET;
-    ServerAddr.sin_port = htons(Port);
-    inet_pton(AF_INET, IP.c_str(), &ServerAddr.sin_addr);
-    RetCode = connect(TCPSock, (SOCKADDR*)&ServerAddr, sizeof(ServerAddr));
-    if (RetCode != 0) {
-        UlStatus = "UlConnection Failed!";
-        error("Client: connect failed! Error code: " + std::to_string(WSAGetLastError()));
-        KillSocket(TCPSock);
-        WSACleanup();
-        Terminate = true;
-        CoreSend("L");
-        return;
-    }
-    info("Connected!");
-
-    char Code = 'C';
-    send(TCPSock, &Code, 1, 0);
     SyncResources(TCPSock);
     while (!Terminate) {
         ServerParser(TCPRcv(TCPSock));
     }
     GameSend("T");
     ////Game Send Terminate
-    if (KillSocket(TCPSock) != 0)
-        debug("(TCP) Cannot close socket. Error code: " + std::to_string(WSAGetLastError()));
+    if (!g_CombinedMode) {
+        if (KillSocket(TCPSock) != 0)
+            debug("(TCP) Cannot close socket. Error code: " + std::to_string(WSAGetLastError()));
 
 #ifdef _WIN32
-    if (WSACleanup() != 0)
-        debug("(TCP) Client: WSACleanup() failed!...");
+        if (WSACleanup() != 0)
+            debug("(TCP) Client: WSACleanup() failed!...");
 #endif
+    }
 }
