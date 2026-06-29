@@ -51,7 +51,7 @@ std::shared_ptr<TClient> gHostClient;       // the virtual client (guarded by gL
 TNetwork* gHostNetwork = nullptr;           // set once in the ready hook (gated by gServerReady), then stable
 std::atomic<bool> gServerReady { false };   // ready hook fired (gHostNetwork usable); gates client creation
 
-constexpr size_t kMaxUDPQueue = 256; // bound: no loopback backpressure, drop-oldest positions
+constexpr size_t kMaxUDPQueue = 16; // bound (~0.27s at the 60Hz ceiling): drop-oldest so a stall sheds STALE positions instead of hoarding latency. Was 256 (~4s of hidden lag).
 
 // Copy the host client under the lock. Callers hold the returned shared_ptr for their whole call,
 // which keeps the InMemoryLink alive even if StopCombinedBridge() resets gHostClient meanwhile.

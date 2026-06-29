@@ -109,7 +109,7 @@ int main(int argc, const char** argv) try {
     InitOptions(argc, argv, options);
     InitLauncher();
 
-    info("BeamMP LAN fork  -  launcher/combined build p13h23 (pairs with mod 4.21.1-LAN p13h29)");
+    info("BeamMP LAN fork  -  launcher/combined build p13h28 (pairs with mod 4.21.1-LAN p13h34)");
 
     info("IMPORTANT: You MUST keep this window open to play BeamMP!");
 

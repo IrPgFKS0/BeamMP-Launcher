@@ -798,6 +798,8 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
 
         CheckForDir();
         std::string FName = ModInfoIter->FileName;
+        int DlAttempts = 0;
+        static constexpr int MaxDlAttempts = 3;
         do {
             debug(beammp_wide("Loading file '") + Utils::ToWString(FName) + beammp_wide("' to '") + beammp_fs_string(PathToSaveTo) + beammp_wide("'"));
             TCPSend("f" + ModInfoIter->FileName, Sock);
@@ -841,20 +843,34 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
             // verify size and hash. Use the non-throwing file_size overload: a write that failed or was
             // interrupted can leave the file absent, and the throwing overload would propagate out of the
             // whole sync routine for a joining player instead of degrading to a clean abort.
+            bool VerifyOk = true;
             {
                 std::error_code ec;
                 auto WrittenSize = std::filesystem::file_size(PathToSaveTo, ec);
                 if (ec || WrittenSize != ModInfoIter->FileSize) {
-                    error(beammp_wide("Failed to write the entire file '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' correctly (file size mismatch)"));
-                    Terminate = true;
+                    VerifyOk = false;
+                    debug("Downloaded '" + FName + "' has wrong size, will retry");
                 }
             }
-
-            if (!Terminate && Utils::GetSha256HashReallyFastFile(PathToSaveTo) != ModInfoIter->Hash) {
-                error(beammp_wide("Failed to write or download the entire file '") + beammp_fs_string(PathToSaveTo) + beammp_wide("' correctly (hash mismatch)"));
-                Terminate = true;
+            if (VerifyOk && Utils::GetSha256HashReallyFastFile(PathToSaveTo) != ModInfoIter->Hash) {
+                VerifyOk = false;
+                debug("Downloaded '" + FName + "' has wrong hash, will retry");
             }
-        } while (!Terminate); // the size mismatch above already sets Terminate; no throwing file_size in the loop condition
+
+            // SUCCESS -> stop. Without this break the do-while (which only exits on Terminate) re-requests
+            // the SAME mod FOREVER on a clean download -- the endless "Download of 'turrets.zip'..." loop
+            // that drops the client and forces a reconnect. On a real mismatch, retry a few times (covers a
+            // transient corrupt transfer) before giving up, so one glitch doesn't abort the whole join.
+            if (VerifyOk) {
+                break;
+            }
+            if (++DlAttempts >= MaxDlAttempts) {
+                error("Failed to download '" + FName + "' correctly after " + std::to_string(MaxDlAttempts) + " attempts (size/hash mismatch)");
+                Terminate = true;
+                break;
+            }
+            warn("Mod '" + FName + "' failed verification, retrying (" + std::to_string(DlAttempts) + "/" + std::to_string(MaxDlAttempts) + ")");
+        } while (!Terminate);
         if (!Terminate) {
             if (!fs::exists(GetGamePath() / beammp_wide("mods/multiplayer"))) {
                 fs::create_directories(GetGamePath() / beammp_wide("mods/multiplayer"));

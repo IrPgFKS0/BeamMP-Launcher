@@ -61,6 +61,9 @@ void info(const std::string& toPrint) {
     addToLog(Print);
 }
 void debug(const std::string& toPrint) {
+    if (options.no_debug) { // --no-debug: skip the format AND the per-line log-file write entirely
+        return;
+    }
     std::string Print = getDate() + "[DEBUG] " + toPrint + "\n";
     if (options.verbose) {
         beammp_stdout << Utils::ToWString(Print);
@@ -98,6 +101,9 @@ void info(const std::wstring& toPrint) {
     addToLog(Print);
 }
 void debug(const std::wstring& toPrint) {
+    if (options.no_debug) { // --no-debug: skip the format AND the per-line log-file write entirely
+        return;
+    }
     std::wstring Print = Utils::ToWString(getDate()) + L"[DEBUG] " + toPrint + L"\n";
     if (options.verbose) {
         std::wcout << Print;
