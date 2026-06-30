@@ -20,7 +20,7 @@ struct Options {
     bool no_update = false;
     bool no_launch = false;
     bool full_mod_hash = false; // force full SHA256 re-validation of cached+mounted mods each connect (default off = fast name+size validate)
-    bool no_debug = false; // suppress [DEBUG] log lines entirely: skips the string build AND the per-line log-file open/write/close in addToLog -- saves a little CPU/IO on a busy host
+    bool no_debug = true; // DEFAULT for public release: [DEBUG] log lines suppressed (skips the string build AND the per-line log-file open/write/close in addToLog). Re-enable with --debug. (--no-debug is kept as an explicit no-op for back-compat.)
     const char* user_path = nullptr;
     const char **game_arguments = nullptr;
     int game_arguments_length = 0;

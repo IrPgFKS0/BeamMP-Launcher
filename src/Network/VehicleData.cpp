@@ -17,12 +17,15 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <fcntl.h> // fcntl O_NONBLOCK for the latest-wins drain
 #endif
 
 #include "Logger.h"
 #include "CombinedHost.h" // --combined: g_CombinedMode + in-memory link send/recv
 #include <array>
 #include <string>
+#include <vector>          // latest-wins drain batch
+#include <unordered_map>   // latest-wins dedup (vehicle key -> newest index)
 
 SOCKET UDPSock = -1;
 sockaddr_in* ToServer = nullptr;
@@ -68,6 +71,31 @@ void UDPParser(std::string_view Packet) {
         ServerParser(Packet);
     }
 }
+// --- latest-wins drain helpers (regular client) ---------------------------------------------------
+// Toggle the UDP socket's blocking mode so we can drain a backlog non-blocking. Returns false if the
+// toggle failed -> the caller must NOT enter the drain loop (a blocking recvfrom there would hang).
+static bool SetUDPNonBlocking(SOCKET s, bool nb) {
+#if defined(_WIN32)
+    u_long mode = nb ? 1 : 0;
+    return ioctlsocket(s, FIONBIO, &mode) == 0;
+#else
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags == -1)
+        return false;
+    return fcntl(s, F_SETFL, nb ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) == 0;
+#endif
+}
+// For a position packet "Zp:<pid>-<vid>:<json>" return the "<pid>-<vid>" vehicle key; empty for any
+// other packet (events, pings, compressed ABG: blobs) which must NEVER be deduped/dropped.
+static std::string_view ZpVehKey(std::string_view p) {
+    if (p.size() < 5 || p[0] != 'Z' || p[1] != 'p' || p[2] != ':')
+        return {};
+    auto c = p.find(':', 3);
+    if (c == std::string_view::npos)
+        return {};
+    return p.substr(3, c - 3);
+}
+
 void UDPRcv() {
     if (g_CombinedMode) {
         // In-memory link: block for one server->client UDP message. Empty => link closed; stop the
@@ -93,8 +121,47 @@ void UDPRcv() {
     int32_t Rcv = recvfrom(UDPSock, Ret.data(), Ret.size() - 1, 0, (sockaddr*)&FromServer, &clientLength);
     if (Rcv == SOCKET_ERROR)
         return;
-    Ret[Rcv] = 0;
-    UDPParser(std::string_view(Ret.data(), Rcv));
+
+    // LATEST-WINS DRAIN. When the game stalls (a frame hitch), GameSend (the TCP proxy to BeamNG)
+    // blocks, so this UDP socket backlogs; replaying that stale backlog makes remote ghosts lag/jump
+    // after the hitch. Drain the whole backlog non-blocking and forward only the NEWEST position per
+    // vehicle ("Zp:<pid>-<vid>:..."); every other packet (events/pings/ABG: blobs) is forwarded
+    // unchanged, in order. (Combined host returned above -- its in-memory bridge already coalesces.)
+    static thread_local std::vector<std::string> batch;
+    batch.clear();
+    batch.emplace_back(Ret.data(), Rcv);
+    if (SetUDPNonBlocking(UDPSock, true)) {
+        for (int i = 0; i < 512; ++i) { // cap the drain so a flood can't spin here forever
+            int32_t r = recvfrom(UDPSock, Ret.data(), Ret.size() - 1, 0, (sockaddr*)&FromServer, &clientLength);
+            if (r <= 0)
+                break;
+            batch.emplace_back(Ret.data(), r);
+        }
+        SetUDPNonBlocking(UDPSock, false);
+    }
+    if (batch.size() == 1) { // no backlog (the common case) -- forward as-is, no dedup overhead
+        UDPParser(batch[0]);
+        return;
+    }
+    // newest index per vehicle key (string_views point into the now-stable batch)
+    static thread_local std::unordered_map<std::string_view, size_t> lastIdx;
+    lastIdx.clear();
+    for (size_t i = 0; i < batch.size(); ++i) {
+        auto k = ZpVehKey(batch[i]);
+        if (!k.empty())
+            lastIdx[k] = i;
+    }
+    size_t dropped = 0;
+    for (size_t i = 0; i < batch.size(); ++i) {
+        auto k = ZpVehKey(batch[i]);
+        if (!k.empty() && lastIdx[k] != i) {
+            ++dropped; // an older position for this vehicle, superseded later in the batch -> drop it
+            continue;
+        }
+        UDPParser(batch[i]);
+    }
+    if (dropped) // visible only with --debug; lets you confirm the drain fires under a receive backlog
+        debug("latest-wins drain: coalesced " + std::to_string(dropped) + " stale position(s) (backlog " + std::to_string(batch.size()) + ")");
 }
 void UDPClientMain(const std::string& IP, int Port) {
 #ifdef _WIN32

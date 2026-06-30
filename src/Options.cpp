@@ -84,7 +84,9 @@ void InitOptions(int argc, const char *argv[], Options &options) {
         } else if (argument == "--full-mod-hash") {
             options.full_mod_hash = true;
         } else if (argument == "--no-debug") {
-            options.no_debug = true;
+            options.no_debug = true; // explicit; [DEBUG] is suppressed by default now, so this is a no-op kept for back-compat
+        } else if (argument == "--debug") {
+            options.no_debug = false; // re-enable [DEBUG] log lines (default is OFF)
         } else if (argument == "--combined" || argument == "--server-only") {
             // Run-MODE selectors, consumed in main() before InitOptions runs (--server-only returns
             // into the server; --combined starts the in-process server and falls through to here).
@@ -131,7 +133,8 @@ void InitOptions(int argc, const char *argv[], Options &options) {
                 "\t--no-update          Skip applying launcher updates (you must update manually)\n"
                 "\t--no-launch          Skip launching the game (you must launch the game manually)\n"
                 "\t--full-mod-hash      Re-verify cached/mounted mods by full SHA256 each connect (default: fast name+size validate)\n"
-                "\t--no-debug           Disable [DEBUG] log lines entirely (skips per-line log-file writes) -- saves a little CPU/IO\n"
+                "\t--debug              Enable [DEBUG] log lines (default: OFF -- suppressed to save CPU/IO and keep logs clean)\n"
+                "\t--no-debug           (no-op, kept for back-compat -- [DEBUG] is already off by default)\n"
                 "\t--dev                Developer mode, same as --verbose --no-download --no-launch --no-update\n"
                 "\t--user-path <path>   Path to BeamNG's User Path\n"
                 "\t--game <args...>     Passes ALL following arguments to the game, see also `--`\n"
