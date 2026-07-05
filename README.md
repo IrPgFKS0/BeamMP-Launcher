@@ -1,5 +1,18 @@
 # BeamMP-Launcher
 
+> ### ⚠️ This is the **LAN-only fork** of the BeamMP launcher (branch `lan`)
+> Modified to run without the BeamMP backend (no login/auth), and extended into the
+> **combined host**: built with the server embedded, one exe runs the dedicated server
+> *and* bridges your own game over an in-memory channel (`--combined`). Docs, prebuilt
+> binaries and the build scripts live in the fork's main repo:
+> **[IrPgFKS0/BeamMP](https://github.com/IrPgFKS0/BeamMP/tree/lan)** →
+> [`docs/lan/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/docs/lan) (setup/tuning),
+> [`dist/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/dist) (release zip),
+> [`tools/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/tools) (build/host scripts —
+> this repo is built via `build-launcher.bat` from a sibling checkout with
+> [BeamMP-Server](https://github.com/IrPgFKS0/BeamMP-Server)'s vcpkg).
+> The sections below are inherited from upstream BeamMP.
+
 The launcher is the way we communitcate to outside the game, it does a few automated actions such as but not limited to: downloading the mod, launching the game, and create a connection to a server.
 
 ## [Getting started](https://docs.beammp.com/game/getting-started/)
