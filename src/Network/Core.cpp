@@ -352,6 +352,12 @@ void Parse(std::string Data, SOCKET CSocket) {
             std::string serverVehicleID = Data.substr(3);
             debug("(Core) Registering direct vehicle: " + serverVehicleID);
             activeVehicles.insert(serverVehicleID);
+            // Drop any previously learned source port: a (re)registration means the VE opened a NEW
+            // socket (vehicle edit reloads the VE VM in place; error paths reopen it), which sends
+            // from a NEW port. DVRcv pins one port per sid and silently drops all others, so a stale
+            // pin would eat every packet from the reloaded vehicle until toggle-off/on. Erasing here
+            // lets the next packet re-learn the current port (one-packet blip, self-heals).
+            vehiclePortMap.erase(serverVehicleID);
         } else if (SubCode == 'd') {
             std::string serverVehicleID = Data.substr(3);
             debug("(Core) Unregistering direct vehicle: " + serverVehicleID);
