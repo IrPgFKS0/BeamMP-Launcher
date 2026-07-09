@@ -1048,7 +1048,14 @@ void SyncResources(SOCKET Sock) {
             }
 #endif
 
-            fs::copy_file(PathToSaveTo, GetGamePath() / beammp_wide("mods/multiplayer") / Utils::ToWString(FName), fs::copy_options::overwrite_existing);
+            // Atomic write (matches the other download sites, per BeamMP-Launcher#250): copy to a
+            // temp name then rename into place, so BeamNG's mod watcher never mounts a half-written
+            // zip ("Invalid ZIP file" on the first download of a large mod).
+            auto destName = GetGamePath() / beammp_wide("mods/multiplayer") / Utils::ToWString(FName);
+            auto tmp_name = destName;
+            tmp_name += L".tmp";
+            fs::copy_file(PathToSaveTo, tmp_name, fs::copy_options::overwrite_existing);
+            fs::rename(tmp_name, destName);
             UpdateModUsage(FN->substr(pos));
         }
         WaitForConfirm();

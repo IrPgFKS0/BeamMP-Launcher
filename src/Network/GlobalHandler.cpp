@@ -97,7 +97,10 @@ void ServerSend(std::string Data, bool Rel) {
         Ack = true;
     if (C == 'N' || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || C == 'C')
         Rel = true;
-    if (compressBound(Data.size()) > 1024)
+    // Opt-in unreliable (UDP) events (BeamMP#892/#253): lowercase 'e' events stay on UDP even when
+    // large -- skip the >1KB compressed-size TCP upgrade for them. 'e' is not in the reliable list
+    // above, so it falls through to the UDP branch below (CombinedServerSendUDP in combined mode).
+    if (C != 'e' && compressBound(Data.size()) > 1024)
         Rel = true;
     if (Ack || Rel) {
         // Combined host: reliable -> the virtual client's in-memory TCP-in queue (uncompressed,
