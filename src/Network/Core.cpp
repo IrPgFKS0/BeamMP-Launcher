@@ -345,6 +345,23 @@ void Parse(std::string Data, SOCKET CSocket) {
         });
         break;
     }
+    case 'V': // direct vehicle socket registration (BeamMP-Launcher#245): 'Va:<sid>' / 'Vd:<sid>'
+        if (Data.length() < 4) {
+            debug("(Core) Failed to parse serverVehicleID from V packet: " + Data);
+        } else if (SubCode == 'a') {
+            std::string serverVehicleID = Data.substr(3);
+            debug("(Core) Registering direct vehicle: " + serverVehicleID);
+            activeVehicles.insert(serverVehicleID);
+        } else if (SubCode == 'd') {
+            std::string serverVehicleID = Data.substr(3);
+            debug("(Core) Unregistering direct vehicle: " + serverVehicleID);
+            activeVehicles.erase(serverVehicleID);
+            vehiclePortMap.erase(serverVehicleID);
+        } else {
+            debug("(Core) Invalid V packet SubCode");
+        }
+        Data.clear();
+        break;
     default:
         Data.clear();
         break;

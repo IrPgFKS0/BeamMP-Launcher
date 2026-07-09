@@ -148,6 +148,11 @@ void NetReset() {
         KillSocket(GSocket);
     }
     GSocket = -1;
+    if (DVSock != (SOCKET)(-1)) { // direct vehicle socket (BeamMP-Launcher#245)
+        debug("Terminating direct vehicle Socket: " + std::to_string(DVSock));
+        KillSocket(DVSock);
+    }
+    DVSock = -1;
 }
 
 SOCKET SetupListener() {
@@ -211,6 +216,12 @@ int ClientID = -1;
 void ParserAsync(std::string_view Data) {
     if (Data.empty())
         return;
+    // Direct vehicle socket (BeamMP-Launcher#245): per-vehicle data (position/electrics/inputs/
+    // powertrain/nodes/controllers) for a vehicle that has a registered direct UDP socket is sent
+    // straight to that socket instead of the GE proxy, bypassing the GE Lua VM. Inert until a VE
+    // registers (via 'Va' on the core channel) AND its port is learned (DVRcv) -- otherwise every
+    // packet falls through to GameSend exactly as before.
+    bool tryDirectVehicleSocket = false;
     char Code = Data.at(0), SubCode = 0;
     if (Data.length() > 1)
         SubCode = Data.at(1);
@@ -228,10 +239,40 @@ void ParserAsync(std::string_view Data) {
         return;
     case 'U':
         magic = Data.substr(1);
+        break;
+    case 'R': // controller sync
+    case 'W': // electrics
+    case 'V': // inputs
+    case 'Y': // powertrain
+    case 'X': // nodes
+    case 'Z': // position
+        tryDirectVehicleSocket = true;
+        break;
     default:
         break;
     }
-    GameSend(Data);
+    if (tryDirectVehicleSocket) {
+        // packet is "<code><sub>:<serverVehicleID>:<data>"; pull the serverVehicleID.
+        size_t first = Data.find(':');
+        if (first == std::string_view::npos) {
+            GameSend(Data);
+            return;
+        }
+        first += 1;
+        size_t len = Data.find(':', first);
+        if (len != std::string_view::npos) {
+            len -= first;
+        }
+        std::string serverVehicleID = std::string(Data.substr(first, len));
+        auto portIter = vehiclePortMap.find(serverVehicleID);
+        if (portIter != vehiclePortMap.end()) {
+            DVSend(Data, portIter->second); // vehicle is connected -> straight to its socket
+        } else {
+            GameSend(Data); // not connected -> normal GE-proxy path
+        }
+    } else {
+        GameSend(Data);
+    }
 }
 void ServerParser(std::string_view Data) {
     ParserAsync(Data);
@@ -408,6 +449,7 @@ void TCPGameServer(const std::string& IP, int Port) {
     GSocket = SetupListener();
     std::unique_ptr<std::thread> ClientThread {};
     std::unique_ptr<std::thread> NetMainThread {};
+    std::unique_ptr<std::thread> DirectVehicleThread {}; // BeamMP-Launcher#245
     while (!TCPTerminate && GSocket != -1) {
         debug("MAIN LOOP OF GAME SERVER");
         GConnected = false;
@@ -448,6 +490,11 @@ void TCPGameServer(const std::string& IP, int Port) {
         if (CServer) {
             // NetMain runs AutoPing + UDPClientMain in BOTH modes; in combined those use the link.
             NetMainThread = std::make_unique<std::thread>(NetMain, IP, Port);
+            // Direct vehicle socket (BeamMP-Launcher#245): bind a UDP socket on port+2 that VEs send
+            // their per-vehicle data straight to (bypassing the GE VM). Its DVRcv forwards to the
+            // server via ServerSend, which is already combined-host aware (in-memory bridge), so this
+            // needs no combined-mode special-casing. Inert until a VE registers + connects.
+            DirectVehicleThread = std::make_unique<std::thread>(DVClientMain, "127.0.0.1", options.port + 2);
             CServer = false;
         }
         int32_t Size, Rcv;
@@ -501,6 +548,11 @@ void TCPGameServer(const std::string& IP, int Port) {
         debug("Waiting for net main thread");
         NetMainThread->join();
         debug("Net main thread done");
+    }
+    if (DirectVehicleThread) { // BeamMP-Launcher#245: DVClientMain exits its recv loop on TCPTerminate
+        debug("Waiting for direct vehicle thread");
+        DirectVehicleThread->join();
+        debug("Direct vehicle thread done");
     }
     if (CSocket != SOCKET_ERROR)
         KillSocket(CSocket);

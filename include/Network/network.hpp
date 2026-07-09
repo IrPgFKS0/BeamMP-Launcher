@@ -9,6 +9,9 @@
 #include <atomic>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 
 #ifdef __linux__
 #include "linuxfixes.h"
@@ -59,3 +62,12 @@ void TCPGameServer(const std::string& IP, int Port);
 bool SecurityWarning();
 void CoreSend(std::string data);
 int RecvWaitAll(int sockfd, char *buf, int len);
+
+// Direct vehicle socket (BeamMP-Launcher#245): VEs send per-vehicle data straight to a UDP socket
+// on port+2, bypassing the GE Lua VM. Inert until a VE registers ('Va') and its port is learned.
+void ServerSend(std::string Data, bool Rel);
+extern uint64_t DVSock;
+extern std::unordered_set<std::string> activeVehicles; // registered serverVehicleIDs
+extern std::unordered_map<std::string, int> vehiclePortMap; // serverVehicleID -> its socket's source port
+void DVSend(std::string_view Data, int Port);
+void DVClientMain(const std::string& IP, int Port);
