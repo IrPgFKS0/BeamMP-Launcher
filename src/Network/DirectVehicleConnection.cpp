@@ -82,17 +82,34 @@ static void DVRcv() {
         return;
     }
     int port = ntohs(FromVehicle.sin_port);
+    // Reliability by payload type: position/inputs ('Z'/'V') stay unreliable (latest-wins), but
+    // chunked deformation ('Xd') MUST arrive complete -- and on the combined host the unreliable
+    // path is a 16-deep drop-oldest queue that a multi-vehicle chunk burst overflows instantly,
+    // evicting chunks (no snapshot ever assembles) AND the position packets sharing the queue
+    // (ghost starvation -- seen as the 2026-07-09 LAN2 watchdog storm). Route the whole 'X' family
+    // reliable; everything else keeps the fast lossy lane.
+    const bool rel = !Data.empty() && Data.at(0) == 'X';
     auto portIter = vehiclePortMap.find(serverVehicleID);
     if (portIter != vehiclePortMap.end()) {
         if (portIter->second == port) {
-            ServerSend(std::move(Data), false); // unreliable (UDP), same as the proxy position path
+            // Periodic ack keepalive: covers a VE that missed the registration ack (UDP). Each
+            // active vehicle sends ~36 msg/s, so every 32nd packet ~= one ack/s to that sender.
+            static uint32_t ackCounter = 0; // DVRcv runs only on the DVClientMain thread
+            if ((++ackCounter & 31u) == 0u)
+                sendto(DVSock, "ok", 2, 0, (sockaddr*)&FromVehicle, size);
+            ServerSend(std::move(Data), rel);
         } else {
             debug("(Direct VE) Data for " + serverVehicleID + " from wrong port: " + std::to_string(port) + " != " + std::to_string(portIter->second));
         }
     } else {
         debug("(Direct VE) Registering port for vehicle " + serverVehicleID + ": " + std::to_string(port));
         vehiclePortMap.insert({ serverVehicleID, port });
-        ServerSend(std::move(Data), false);
+        // Ack the registration straight back to the VE's socket. The VE treats ANY datagram on its
+        // socket as proof a listening launcher owns this port and only then abandons the GE path --
+        // without this, an OLD launcher (no direct socket) let sends vanish into the void silently
+        // (LAN2 2026-07-09: car frozen for everyone else while its sends reported success).
+        sendto(DVSock, "ok", 2, 0, (sockaddr*)&FromVehicle, size);
+        ServerSend(std::move(Data), rel);
     }
 }
 
