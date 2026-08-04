@@ -668,7 +668,9 @@ void NewSyncResources(SOCKET Sock, const std::string& Mods, const std::vector<Mo
                     std::string Tmp = Dest.string() + ".tmp";
                     fs::copy_file(Src, Tmp, fs::copy_options::overwrite_existing);
                     fs::rename(Tmp, Dest);
-                    debug("Combined host: mounted local mod '" + ModInfoIter->FileName + "'");
+                    // info, not debug: launcher-only mode shows every mod it installs, and the host
+                    // was the one surface where a mod silently changed under you.
+                    info("Combined host: mounted updated server mod into mods/multiplayer: '" + ModInfoIter->FileName + "'");
                 }
                 UpdateUl(false, std::to_string(ModNo) + "/" + std::to_string(TotalMods) + ": " + ModInfoIter->FileName);
                 UpdateModUsage(FileName);

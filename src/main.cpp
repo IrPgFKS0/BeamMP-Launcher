@@ -95,6 +95,9 @@ int main(int argc, const char** argv) try {
         // cache dir is also ./Resources, so they collide -- the launcher's mod cache + mods.json +
         // pending_mod_removals.txt + prune would clobber the server's structure. Scope the launcher
         // cache to ./Resources/cache so the two never touch.
+        // NB: this override runs AFTER ConfigInit, which prints "Mod caching directory: ./Resources"
+        // from Launcher.cfg -- that line is about the config value, not the one in effect here. The
+        // banner below reports the value that actually applies so the log can't mislead.
         CachingDirectory = std::filesystem::path("./Resources/cache");
         // Printed after system("cls") so it persists on screen. Makes the two-processes-in-one-window
         // nature explicit to whoever launched it.
@@ -102,14 +105,15 @@ int main(int argc, const char** argv) try {
         info("  COMBINED HOST  -  one window, two processes:");
         info("    [1] dedicated server   (in-process, headless -> Server.log)");
         info("    [2] launcher + your game (this window)");
-        info("  Cache isolated at ./Resources/cache; other players join this PC over the LAN.");
+        info("  Mod cache for this mode: ./Resources/cache (isolated from the server's own tree).");
+        info("  Other players join this PC over the LAN.");
         info("============================================================");
     }
 #endif
     InitOptions(argc, argv, options);
     InitLauncher();
 
-    info("BeamMP LAN fork  -  launcher/combined build p13h35 (pairs with mod 4.22.0-LAN p13h60+; BeamNG 0.39; direct vehicle socket + registration ack)");
+    info("BeamMP LAN fork  -  launcher/combined build p13h36 (pairs with mod 4.22.1-LAN p13h82+; BeamNG 0.39; upstream 4.22.1 sync; direct vehicle socket + registration ack)");
 
     info("IMPORTANT: You MUST keep this window open to play BeamMP!");
 

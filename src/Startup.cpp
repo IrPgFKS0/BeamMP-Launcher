@@ -550,14 +550,23 @@ void PreGame(const beammp_fs_string& GamePath) {
                     != Utils::GetSha256HashReallyFastFile(DestZip);
             }
         }
+        // Always say WHICH mod build ended up in the game, installed or not. In combined mode the
+        // host usually deploys the zip to both places at once, so the "installed" line never fired
+        // and there was no confirmation on screen that the new mod took -- report the identity
+        // (sha8 + size) in both branches so a version change is visible either way.
+        std::error_code idec;
+        auto SrcSha = Utils::GetSha256HashReallyFastFile(SrcZip);
+        auto SrcSizeBytes = fs::file_size(SrcZip, idec);
+        std::string Ident = "sha " + (SrcSha.size() >= 8 ? SrcSha.substr(0, 8) : SrcSha) + ", "
+            + (idec ? std::string("? MB") : std::to_string(SrcSizeBytes / (1024 * 1024)) + " MB");
         if (!NeedsCopy) {
-            info("BeamMP mod already up to date in mods/multiplayer (skipping reinstall).");
+            info("BeamMP mod: already current in mods/multiplayer (" + Ident + ") -- no reinstall needed.");
         } else {
             fs::copy_file(SrcZip, DestZip, fs::copy_options::overwrite_existing, ec);
             if (ec) {
                 error("Failed to install bundled BeamMP.zip: " + ec.message());
             } else {
-                info("Installed local BeamMP mod into mods/multiplayer.");
+                info("BeamMP mod: INSTALLED a new build into mods/multiplayer (" + Ident + ").");
             }
         }
     } else if (!fs::exists(DestZip)) {
