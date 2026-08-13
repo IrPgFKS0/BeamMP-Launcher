@@ -7,6 +7,7 @@
 #include "Network/network.hpp"
 #include "Zlib/Compressor.h"
 #include <stdexcept>
+#include <thread> // upstream #268: paced UDP registration burst
 
 #if defined(_WIN32)
 #include <ws2tcpip.h>
@@ -208,9 +209,14 @@ void UDPClientMain(const std::string& IP, int Port) {
     // combined mode there is no endpoint -- the in-process server already has the host client bound
     // to the in-memory link (HandleVirtualUDP) -- so skip it (otherwise we'd push magic packets the
     // server would mis-parse). The UDP socket created above is left unused; the bridge handles I/O.
-    if (!g_CombinedMode && !magic.empty())
-        for (int i = 0; i < 10; i++)
+    if (!g_CombinedMode && !magic.empty()) {
+        for (int i = 0; i < 10; i++) {
+            // upstream #268: space the burst out -- 10 back-to-back datagrams can race the
+            // server's registration handling and all be seen before it starts listening
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             UDPSend(magic);
+        }
+    }
     GameSend("P" + std::to_string(ClientID));
     TCPSend("H", TCPSock);
     UDPSend("p");
