@@ -95,7 +95,7 @@ void ServerSend(std::string Data, bool Rel) {
         C = Data.at(0);
     if (C == 'O' || C == 'T')
         Ack = true;
-    if (C == 'N' || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || C == 'C')
+    if (C == 'N' || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || C == 'C' || C == 't') // 't' added upstream (#266); no sender exists yet in mod or launcher -- taken for merge parity
         Rel = true;
     // Opt-in unreliable (UDP) events (BeamMP#892/#253): lowercase 'e' events stay on UDP even when
     // large -- skip the >1KB compressed-size TCP upgrade for them. 'e' is not in the reliable list
