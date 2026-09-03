@@ -24,6 +24,8 @@
 #include "Logger.h"
 #include "CombinedHost.h" // --combined: g_CombinedMode + in-memory link send/recv
 #include <array>
+#include <future>          // upstream #269: async magic registration burst
+#include <mutex>           // upstream #269: UDPSendMutex (burst thread vs game/direct-socket senders)
 #include <string>
 #include <vector>          // latest-wins drain batch
 #include <unordered_map>   // latest-wins dedup (vehicle key -> newest index)
@@ -31,7 +33,10 @@
 SOCKET UDPSock = -1;
 sockaddr_in* ToServer = nullptr;
 
+std::mutex UDPSendMutex; // upstream #269: the async magic burst sends concurrently with the game/direct-socket senders
+
 void UDPSend(std::string Data) {
+    std::scoped_lock lock(UDPSendMutex);
     if (g_CombinedMode) {
         // In-memory link: hand the raw payload to the in-process server. No ClientID:/prefix and no
         // compression -- HandleVirtualUDP already knows the host client and feeds GlobalParser directly.
@@ -209,13 +214,18 @@ void UDPClientMain(const std::string& IP, int Port) {
     // combined mode there is no endpoint -- the in-process server already has the host client bound
     // to the in-memory link (HandleVirtualUDP) -- so skip it (otherwise we'd push magic packets the
     // server would mis-parse). The UDP socket created above is left unused; the bridge handles I/O.
+    std::future<void> magicSend;
     if (!g_CombinedMode && !magic.empty()) {
-        for (int i = 0; i < 10; i++) {
-            // upstream #268: space the burst out -- 10 back-to-back datagrams can race the
-            // server's registration handling and all be seen before it starts listening
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            UDPSend(magic);
-        }
+        // upstream #268 spaced the 10-packet burst out so the server's registration handling can't
+        // miss the whole volley; upstream #269 then moved it off the connect path -- the burst now
+        // runs on its own thread (50 ms spacing, ~500 ms total) so the P/H handshake below is no
+        // longer held up by it. Joined after the receive loop, before the socket is killed.
+        magicSend = std::async(std::launch::async, []() {
+            for (int i = 0; i < 10; i++) {
+                UDPSend(magic);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
     }
     GameSend("P" + std::to_string(ClientID));
     TCPSend("H", TCPSock);
@@ -225,6 +235,9 @@ void UDPClientMain(const std::string& IP, int Port) {
         UDPRcv();
     }
     debug("UDP receive loop done");
+    if (magicSend.valid()) {
+        magicSend.get(); // #269: never kill the socket under the burst thread
+    }
     KillSocket(UDPSock);
     WSACleanup();
 }
