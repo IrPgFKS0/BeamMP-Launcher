@@ -928,6 +928,8 @@ void SyncResources(SOCKET Sock) {
         auto ParsedInfo = ModInfo::ParseModInfosFromPacket(Ret);
         if (!ParsedInfo.has_value()) {
             error("Invalid mod info from server (a mod name was not a bare *.zip filename) -- refusing to sync");
+            UUl("Invalid mod list from server (a mod name was not a bare *.zip)"); // surface it in-game instead of a stuck 'Loading...'
+            CoreSend("L"); // mirror Auth()'s abort: tell the game the join is over
             Terminate = true;
             return;
         }

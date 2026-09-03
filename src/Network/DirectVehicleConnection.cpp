@@ -31,12 +31,18 @@
 
 #include "Logger.h"
 #include <array>
+#include <mutex>
 #include <string>
 
 SOCKET DVSock = -1;
 static sockaddr_in ToVehicle;
 std::unordered_set<std::string> activeVehicles;
 std::unordered_map<std::string, int> vehiclePortMap;
+// Both containers are touched from FOUR threads (Core thread Va/Vd insert/erase, this DV thread's
+// find/insert/clear, and the TCP + UDP receive threads' find in ParserAsync). An unordered_map
+// rehash or erase racing a find is UB on both STLs -- a rare, unexplained crash that on the
+// combined host is the whole session. Hold this for every access; never across a send.
+std::mutex DVMapMutex;
 
 // Pull the "<serverVehicleID>" from a "<code>:<serverVehicleID>:<data>" packet. Empty on malformed.
 static std::string_view ExtractServerVehicleID(std::string_view Data) {
@@ -77,10 +83,6 @@ static void DVRcv() {
         return;
     }
     std::string serverVehicleID(sidView);
-    if (!activeVehicles.contains(serverVehicleID)) {
-        debug("(Direct VE) Received data from unregistered vehicle: " + serverVehicleID);
-        return;
-    }
     int port = ntohs(FromVehicle.sin_port);
     // Reliability by payload type: position/inputs ('Z'/'V') stay unreliable (latest-wins), but
     // chunked deformation ('Xd') MUST arrive complete -- and on the combined host the unreliable
@@ -89,27 +91,49 @@ static void DVRcv() {
     // (ghost starvation -- seen as the 2026-07-09 LAN2 watchdog storm). Route the whole 'X' family
     // reliable; everything else keeps the fast lossy lane.
     const bool rel = !Data.empty() && Data.at(0) == 'X';
-    auto portIter = vehiclePortMap.find(serverVehicleID);
-    if (portIter != vehiclePortMap.end()) {
-        if (portIter->second == port) {
-            // Periodic ack keepalive: covers a VE that missed the registration ack (UDP). Each
-            // active vehicle sends ~36 msg/s, so every 32nd packet ~= one ack/s to that sender.
-            static uint32_t ackCounter = 0; // DVRcv runs only on the DVClientMain thread
-            if ((++ackCounter & 31u) == 0u)
-                sendto(DVSock, "ok", 2, 0, (sockaddr*)&FromVehicle, size);
-            ServerSend(std::move(Data), rel);
+    // Decide under the lock, act outside it (ServerSend takes its own locks; never nest).
+    enum { Unregistered, KnownPort, WrongPort, NewPort } verdict;
+    int knownPort = -1;
+    {
+        std::scoped_lock lock(DVMapMutex);
+        if (!activeVehicles.contains(serverVehicleID)) {
+            verdict = Unregistered;
         } else {
-            debug("(Direct VE) Data for " + serverVehicleID + " from wrong port: " + std::to_string(port) + " != " + std::to_string(portIter->second));
+            auto portIter = vehiclePortMap.find(serverVehicleID);
+            if (portIter != vehiclePortMap.end()) {
+                knownPort = portIter->second;
+                verdict = (knownPort == port) ? KnownPort : WrongPort;
+            } else {
+                vehiclePortMap.insert({ serverVehicleID, port });
+                verdict = NewPort;
+            }
         }
-    } else {
+    }
+    switch (verdict) {
+    case Unregistered:
+        debug("(Direct VE) Received data from unregistered vehicle: " + serverVehicleID);
+        return;
+    case WrongPort:
+        debug("(Direct VE) Data for " + serverVehicleID + " from wrong port: " + std::to_string(port) + " != " + std::to_string(knownPort));
+        return;
+    case KnownPort: {
+        // Periodic ack keepalive: covers a VE that missed the registration ack (UDP). Each
+        // active vehicle sends ~36 msg/s, so every 32nd packet ~= one ack/s to that sender.
+        static uint32_t ackCounter = 0; // DVRcv runs only on the DVClientMain thread
+        if ((++ackCounter & 31u) == 0u)
+            sendto(DVSock, "ok", 2, 0, (sockaddr*)&FromVehicle, size);
+        ServerSend(std::move(Data), rel);
+        return;
+    }
+    case NewPort:
         debug("(Direct VE) Registering port for vehicle " + serverVehicleID + ": " + std::to_string(port));
-        vehiclePortMap.insert({ serverVehicleID, port });
         // Ack the registration straight back to the VE's socket. The VE treats ANY datagram on its
         // socket as proof a listening launcher owns this port and only then abandons the GE path --
         // without this, an OLD launcher (no direct socket) let sends vanish into the void silently
         // (LAN2 2026-07-09: car frozen for everyone else while its sends reported success).
         sendto(DVSock, "ok", 2, 0, (sockaddr*)&FromVehicle, size);
         ServerSend(std::move(Data), rel);
+        return;
     }
 }
 
@@ -154,6 +178,9 @@ void DVClientMain(const std::string& IP, int Port) {
     KillSocket(DVSock);
     DVSock = -1;
     WSACleanup();
-    activeVehicles.clear();
-    vehiclePortMap.clear();
+    {
+        std::scoped_lock lock(DVMapMutex); // a late Vd on the Core thread can race this teardown
+        activeVehicles.clear();
+        vehiclePortMap.clear();
+    }
 }

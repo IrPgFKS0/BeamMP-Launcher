@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <mutex>
 #include <unordered_set>
 
 #ifdef __linux__
@@ -67,6 +68,7 @@ int RecvWaitAll(int sockfd, char *buf, int len);
 // on port+2, bypassing the GE Lua VM. Inert until a VE registers ('Va') and its port is learned.
 void ServerSend(std::string Data, bool Rel);
 extern uint64_t DVSock;
+extern std::mutex DVMapMutex; // guards activeVehicles + vehiclePortMap: written by the Core thread (Va/Vd) and the DV thread, read by the TCP + UDP receive threads
 extern std::unordered_set<std::string> activeVehicles; // registered serverVehicleIDs
 extern std::unordered_map<std::string, int> vehiclePortMap; // serverVehicleID -> its socket's source port
 void DVSend(std::string_view Data, int Port);

@@ -264,9 +264,15 @@ void ParserAsync(std::string_view Data) {
             len -= first;
         }
         std::string serverVehicleID = std::string(Data.substr(first, len));
-        auto portIter = vehiclePortMap.find(serverVehicleID);
-        if (portIter != vehiclePortMap.end()) {
-            DVSend(Data, portIter->second); // vehicle is connected -> straight to its socket
+        int dvPort = -1;
+        {
+            std::scoped_lock lock(DVMapMutex); // copy the port out; DVSend/GameSend run unlocked
+            auto portIter = vehiclePortMap.find(serverVehicleID);
+            if (portIter != vehiclePortMap.end())
+                dvPort = portIter->second;
+        }
+        if (dvPort >= 0) {
+            DVSend(Data, dvPort); // vehicle is connected -> straight to its socket
         } else {
             GameSend(Data); // not connected -> normal GE-proxy path
         }

@@ -102,6 +102,17 @@ void StartEmbeddedServer(int argc, const char** argv) {
         } catch (...) {
             CombinedDbg("server thread: BeamMPServerMain THREW a non-std exception");
         }
+        // The embedded server is GONE from here on: the TNetwork gHostNetwork pointed at lived on
+        // BeamMPServerMain's stack. Without this reset a later join (or a stray virtual-UDP send)
+        // dereferenced freed memory. Drop readiness + the pointer + the virtual client under the
+        // link lock so the join path fails loudly and cleanly instead.
+        {
+            std::lock_guard<std::mutex> Lk(gLinkMtx);
+            gServerReady.store(false);
+            gHostNetwork = nullptr;
+            gHostClient.reset();
+        }
+        LogErr("Combined host: the embedded server has STOPPED -- this window can no longer host a session; restart BeamMP-Combined.exe");
     }).detach();
     CombinedDbg("StartEmbeddedServer: server thread detached, returning to launcher");
 }

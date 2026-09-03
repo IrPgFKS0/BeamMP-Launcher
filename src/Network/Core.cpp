@@ -351,6 +351,7 @@ void Parse(std::string Data, SOCKET CSocket) {
         } else if (SubCode == 'a') {
             std::string serverVehicleID = Data.substr(3);
             debug("(Core) Registering direct vehicle: " + serverVehicleID);
+            std::scoped_lock lock(DVMapMutex);
             activeVehicles.insert(serverVehicleID);
             // Drop any previously learned source port: a (re)registration means the VE opened a NEW
             // socket (vehicle edit reloads the VE VM in place; error paths reopen it), which sends
@@ -361,6 +362,7 @@ void Parse(std::string Data, SOCKET CSocket) {
         } else if (SubCode == 'd') {
             std::string serverVehicleID = Data.substr(3);
             debug("(Core) Unregistering direct vehicle: " + serverVehicleID);
+            std::scoped_lock lock(DVMapMutex);
             activeVehicles.erase(serverVehicleID);
             vehiclePortMap.erase(serverVehicleID);
         } else {
