@@ -35,7 +35,7 @@
 #include <string>
 
 SOCKET DVSock = -1;
-static sockaddr_in ToVehicle;
+static sockaddr_in ToVehicle; // template only (family + address); the port is stamped on a per-call COPY in DVSend
 std::unordered_set<std::string> activeVehicles;
 std::unordered_map<std::string, int> vehiclePortMap;
 // Both containers are touched from FOUR threads (Core thread Va/Vd insert/erase, this DV thread's
@@ -59,8 +59,14 @@ static std::string_view ExtractServerVehicleID(std::string_view Data) {
 void DVSend(std::string_view Data, int Port) {
     if (DVSock == (SOCKET)-1)
         return;
-    ToVehicle.sin_port = htons(uint16_t(Port));
-    int sendOk = sendto(DVSock, Data.data(), int(Data.size()), 0, (sockaddr*)&ToVehicle, sizeof(ToVehicle));
+    // Per-call COPY, never the shared ToVehicle: DVSend is reached from BOTH receive threads
+    // (TCPClientMain and NetMain, via ServerParser -> ParserAsync). Mutating one module-scope
+    // sockaddr's port and then sending meant thread A could stamp port X, thread B overwrite it
+    // with Y, and A's packet leave for Y -- a position/input packet delivered to the WRONG
+    // vehicle's socket. The h39 DVMapMutex covered the registries but not this.
+    sockaddr_in Dest = ToVehicle;
+    Dest.sin_port = htons(uint16_t(Port));
+    int sendOk = sendto(DVSock, Data.data(), int(Data.size()), 0, (sockaddr*)&Dest, sizeof(Dest));
     if (sendOk == SOCKET_ERROR)
         error("(Direct VE) Failed to send data. Error Code : " + std::to_string(WSAGetLastError()));
 }
