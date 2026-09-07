@@ -113,7 +113,7 @@ int main(int argc, const char** argv) try {
     InitOptions(argc, argv, options);
     InitLauncher();
 
-    info("BeamMP LAN fork  -  launcher/combined build p13h40 (pairs with mod 4.22.2-LAN p13h93+; BeamNG 0.39.x; upstream 4.22.2 sync + #266/#268/#269 async registration; embedded server 3.9.4 TimeSync-ready; mod-filename path-traversal fix a9faac2; direct vehicle socket + registration ack)");
+    info("BeamMP LAN fork  -  launcher/combined build p13h41 (pairs with mod 4.22.2-LAN p13h94+; BeamNG 0.39.x; upstream 4.22.2 sync + #266/#268/#269 async registration; embedded server 3.9.4 TimeSync-ready; mod-filename path-traversal fix a9faac2; direct vehicle socket + registration ack)");
 
     info("IMPORTANT: You MUST keep this window open to play BeamMP!");
 
