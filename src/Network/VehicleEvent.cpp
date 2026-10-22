@@ -9,6 +9,7 @@
 #include <Zlib/Compressor.h>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <vector>
 
 #if defined(_WIN32)
@@ -52,6 +53,8 @@ void UUl(const std::string& R) {
     UlStatus = "UlDisconnected: " + R;
 }
 
+std::mutex TCPSendMutex; // upstream #271: keep an entire framed message contiguous across partial sends
+
 void TCPSend(const std::string& Data, uint64_t Sock) {
     if (g_CombinedMode) {
         // In-memory link: hand the raw message to the in-process server's host client. The queue
@@ -59,6 +62,8 @@ void TCPSend(const std::string& Data, uint64_t Sock) {
         CombinedServerSendTCP(Data);
         return;
     }
+    std::scoped_lock lock(TCPSendMutex);
+
     if (Sock == -1) {
         Terminate = true;
         UUl("Invalid Socket");
