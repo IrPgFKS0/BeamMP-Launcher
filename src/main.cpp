@@ -113,7 +113,7 @@ int main(int argc, const char** argv) try {
     InitOptions(argc, argv, options);
     InitLauncher();
 
-    info("BeamMP LAN fork  -  launcher/combined build p13h44 (pairs with mod 4.23.1-LAN p13h107+; BeamNG 0.40.1; upstream #271 serializes TCP frames across concurrent senders; Linux Steam game-dir detection searches every Steam install; embedded-server shutdown restores the terminal + flushes streams; #266/#268/#269 async registration; embedded server 3.9.4 TimeSync-ready; mod-filename path-traversal fix a9faac2; direct vehicle socket + registration ack)");
+    info("BeamMP LAN fork  -  launcher/combined build p13h46 (pairs with mod 4.23.1-LAN p13h107+; BeamNG 0.40.3; embedded server shows server plugins the host's own player at a LAN address (BeamNG.Earth shared world generation) and keeps a car's spawn vid/pos/rot across edits so late joiners see edited cars; upstream #271 serializes TCP frames across concurrent senders; Linux Steam game-dir detection searches every Steam install; embedded-server shutdown restores the terminal + flushes streams; #266/#268/#269 async registration; embedded server 3.9.4 TimeSync-ready; mod-filename path-traversal fix a9faac2; direct vehicle socket + registration ack)");
 
     info("IMPORTANT: You MUST keep this window open to play BeamMP!");
 
